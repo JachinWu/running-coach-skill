@@ -1,0 +1,21 @@
+{
+  "personal_bests": {
+    "5k": [],
+    "10k": [],
+    "half_marathon": [],
+    "marathon": []
+  },
+  "physiology_history": [
+    {
+      "date": "2024-01-01",
+      "vo2max": 50.0,
+      "lthr": 160,
+      "lt_pace": "5:00"
+    }
+  ],
+  "injuries": [],
+  "health_notes": [],
+  "progress_milestones": [],
+  "coaching_notes": [],
+  "last_updated": "2024-01-01"
+}
