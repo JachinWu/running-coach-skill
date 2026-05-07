@@ -41,8 +41,8 @@ def get_recent_runs(days=14):
         an_te = r.get("anaerobicTrainingEffect", 0.0)
         
         # Dynamics
-        cadence = r.get("averageRunningCadenceInStepsPerMinute", 0)
-        stride = r.get("avgStrideLength", 0)
+        cadence = r.get("averageRunCadence", 0)
+        stride = r.get("strideLength", 0)
 
         # 轉換配速
         def speed_to_pace(speed_ms):
