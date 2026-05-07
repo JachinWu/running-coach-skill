@@ -356,8 +356,8 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
                 l_dur = lap.get("duration", 0) / 60.0
                 l_speed = lap.get("averageSpeed", 0)
                 l_hr = lap.get("averageHR", "N/A")
-                l_cadence = lap.get("averageRunningCadenceInStepsPerMinute", "N/A")
-                l_stride = lap.get("avgStrideLength", "N/A")
+                l_cadence = lap.get("averageRunCadence", "N/A")
+                l_stride = lap.get("strideLength", "N/A")
                 l_pace = speed_to_pace(l_speed)
                 laps_text += f"    - L{lap_idx}: {l_dist:.2f}km | {l_dur:.1f}分 | 配速 {l_pace}/km | 心率 {l_hr} | 步頻 {l_cadence} | 步幅 {l_stride}\n"
     except Exception as e:

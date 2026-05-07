@@ -73,8 +73,8 @@ def get_recent_runs(days=14):
                     l_speed = lap.get("averageSpeed", 0)
                     l_hr = lap.get("averageHR", 0)
                     l_max_hr = lap.get("maxHR", 0)
-                    l_cadence = lap.get("averageRunningCadenceInStepsPerMinute", 0)
-                    l_stride = lap.get("avgStrideLength", 0)
+                    l_cadence = lap.get("averageRunCadence", 0)
+                    l_stride = lap.get("strideLength", 0)
                     l_pace = speed_to_pace(l_speed)
                     print(f"      L{lap_idx}: {l_dist:.2f} km | {l_dur:.1f} 分 | {l_pace} /km | HR {l_hr} | Cadence {l_cadence} | Stride {l_stride:.0f}cm")
         except Exception as e:
