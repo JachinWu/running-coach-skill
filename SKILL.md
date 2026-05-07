@@ -130,6 +130,33 @@ python scripts/upload_calendar.py --mode g2c
 
 ---
 
+## Bot Integration (bot_bridge.py)
+
+For agents or bot frameworks looking to integrate the running coach, use `scripts/bot_bridge.py`. This module provides high-level handlers that return formatted strings (HTML/Markdown) suitable for chat interfaces.
+
+### Command Handlers
+```python
+import bot_bridge
+
+# api = authenticated Garmin API object
+today_text = await bot_bridge.get_today_summary(api)
+status_text = await bot_bridge.get_status_summary(api)
+profile_text = await bot_bridge.get_profile_summary()
+goal_text = await bot_bridge.get_goal_summary(subcommand="show", args=[])
+```
+
+### Background Polling
+To enable post-run auto-analysis, run the polling task:
+```python
+await bot_bridge.run_post_run_polling(
+    get_api_func=your_api_getter,
+    send_message_func=your_async_send_message_func,
+    poll_interval=900
+)
+```
+
+---
+
 ## Resources
 - **Scripts**:
     - `get_recent_runs.py`: Fetches Garmin activity summaries from the last N days.

@@ -342,3 +342,11 @@ def format_profile_summary(profile: Optional[dict] = None) -> str:
 
     lines.append(f"\n*最後更新：{p.get('last_updated', '未知')}*")
     return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    import sys
+    if "--show" in sys.argv:
+        print(format_profile_summary())
+    else:
+        print("Athlete Profile Module. Use --show to display summary.")
