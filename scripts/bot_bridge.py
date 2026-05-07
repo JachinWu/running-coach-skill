@@ -330,8 +330,11 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
     max_hr = activity.get("maxHR", "N/A")
     avg_speed = activity.get("averageSpeed", 0)
     max_speed = activity.get("maxSpeed", 0)
-    cadence = activity.get("averageRunCadence", "N/A")
-    stride = activity.get("strideLength", "N/A")
+    
+    # Dynamics (List API keys)
+    cadence = activity.get("averageRunningCadence") or activity.get("averageRunningCadenceInStepsPerMinute") or activity.get("averageRunCadence", "N/A")
+    stride = activity.get("avgStrideLength") or activity.get("strideLength", "N/A")
+    
     te_label = activity.get("trainingEffectLabel", "N/A")
     ae_te = activity.get("aerobicTrainingEffect", "N/A")
     an_te = activity.get("anaerobicTrainingEffect", "N/A")

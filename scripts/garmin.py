@@ -283,6 +283,11 @@ class WorkoutFactory:
                 garmin_steps.append({
                     "type": "RepeatGroupDTO",
                     "stepOrder": current_order,
+                    "stepType": {
+                        "stepTypeId": 6,
+                        "stepTypeKey": "repeat",
+                        "displayOrder": 1,
+                    },
                     "numberOfIterations": step['iterations'],
                     "workoutSteps": sub_steps,
                     "numberOfSteps": len(sub_steps)
