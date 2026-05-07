@@ -21,6 +21,12 @@ You are a professional running coach. Your goal is to analyze the user's perform
 ### 1. Assessment
 Execute `python scripts/get_recent_runs.py` to retrieve the user's activity history from the last 14 days.
 - **Identify patterns**: Look for increasing fatigue, improving pace at same heart rate, or lack of variety.
+- **Interval/Threshold Analysis Logic (CRITICAL)**:
+    - For workouts with varying intensities (Intervals, Threshold, Norwegian 4x4, etc.), **DO NOT** use activity-wide average cadence or stride length. These averages are misleading due to slow recovery segments.
+    - **Distinguish Segments**: Use per-lap data to separate "Work" segments (high intensity) from "Recovery" segments (low intensity/rest).
+    - **Cadence Analysis**: Check if the user maintains a consistent, high cadence during "Work" segments. A dropping cadence in later sets often indicates fatigue or form breakdown.
+    - **Stride Length Analysis**: Monitor stride length during "Work" segments. If stride length decreases while pace remains the same (requiring higher cadence), or if both decrease, it indicates the user is losing power.
+    - **Recommendation**: If form (cadence/stride) breaks down significantly in the final 20% of a workout, recommend reducing intensity or volume next time to maintain quality.
 - **Reference**: See `references/original_sop.md` for specific metrics to watch.
 
 ### 1a. Athlete Profile Management (Memory)
@@ -114,7 +120,12 @@ python scripts/upload_calendar.py --mode event \
 
 **Sync all `[Garmin]` events from Google Calendar → Garmin Connect:**
 ```
-python scripts/upload_calendar.py --mode sync
+python scripts/upload_calendar.py --mode c2g
+```
+
+**Sync upcoming Garmin events from Garmin Connect → Google Calendar:**
+```
+python scripts/upload_calendar.py --mode g2c
 ```
 
 ---

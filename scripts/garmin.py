@@ -380,41 +380,111 @@ def get_today_scheduled_workout(api: Garmin) -> dict | None:
 
 
 def get_weekly_summary(api: Garmin) -> dict:
-    """Get this week's running statistics (Monday to today).
+    """Get running statistics for the past 7 days (including today).
 
     Args:
         api: Authenticated Garmin API object.
 
     Returns:
-        Dict with runs_count, total_distance_km, total_duration_min, avg_hr,
-        week_start, or 'error' key on failure.
+        Dict with summary (grouped by activity type), start_date, end_date, or 'error' key.
     """
     today = date.today()
-    start_of_week = today - datetime.timedelta(days=today.weekday())
+    start_date = today - datetime.timedelta(days=6)
     success, activities, error = safe_api_call(
         api.get_activities_by_date,
-        start_of_week.isoformat(),
+        start_date.isoformat(),
         today.isoformat(),
     )
     if not success:
         return {"error": error}
 
-    runs = [
-        a for a in (activities or [])
-        if a.get("activityType", {}).get("typeKey") == "running"
-    ]
-    total_distance = sum(r.get("distance", 0) for r in runs) / 1000.0
-    total_duration = sum(r.get("duration", 0) for r in runs) / 60.0
-    hr_values = [r.get("averageHR", 0) for r in runs if r.get("averageHR", 0) > 0]
-    avg_hr = round(sum(hr_values) / len(hr_values), 1) if hr_values else 0.0
+    summary_by_type = {}
+    
+    for activity in (activities or []):
+        act_type = activity.get("activityType", {}).get("typeKey", "")
+        
+        if "running" in act_type:
+            key = "跑步"
+        elif "swimming" in act_type:
+            key = "游泳"
+        elif "cycling" in act_type:
+            key = "自行車"
+        else:
+            continue
+            
+        if key not in summary_by_type:
+            summary_by_type[key] = {
+                "runs_count": 0,
+                "total_distance_km": 0.0,
+                "total_duration_min": 0.0,
+                "hr_values": []
+            }
+            
+        summary_by_type[key]["runs_count"] += 1
+        summary_by_type[key]["total_distance_km"] += activity.get("distance", 0) / 1000.0
+        summary_by_type[key]["total_duration_min"] += activity.get("duration", 0) / 60.0
+        if activity.get("averageHR", 0) > 0:
+            summary_by_type[key]["hr_values"].append(activity.get("averageHR", 0))
+
+    final_summary = {}
+    for key, data in summary_by_type.items():
+        avg_hr = round(sum(data["hr_values"]) / len(data["hr_values"]), 1) if data["hr_values"] else 0.0
+        final_summary[key] = {
+            "runs_count": data["runs_count"],
+            "total_distance_km": round(data["total_distance_km"], 2),
+            "total_duration_min": round(data["total_duration_min"], 1),
+            "avg_hr": avg_hr,
+        }
 
     return {
-        "runs_count": len(runs),
-        "total_distance_km": round(total_distance, 2),
-        "total_duration_min": round(total_duration, 1),
-        "avg_hr": avg_hr,
-        "week_start": start_of_week.isoformat(),
+        "summary": final_summary,
+        "start_date": start_date.isoformat(),
+        "end_date": today.isoformat(),
     }
+
+
+def get_upcoming_schedule(api: Garmin) -> list:
+    """Get scheduled workouts from today until the coming Sunday.
+
+    Args:
+        api: Authenticated Garmin API object.
+
+    Returns:
+        List of dicts containing date and workout info (or None if rest day).
+    """
+    today = date.today()
+    days_until_sunday = (6 - today.weekday()) % 7
+    coming_sunday = today + datetime.timedelta(days=days_until_sunday)
+
+    # Fetch workouts for current month
+    success, calendar_data, error = safe_api_call(
+        api.get_scheduled_workouts, today.year, today.month
+    )
+    if not success:
+        return [{"error": error}]
+
+    items = (calendar_data or {}).get("calendarItems", [])
+
+    # If Sunday falls in next month, fetch that month too
+    if coming_sunday.month != today.month:
+        success2, calendar_data2, _ = safe_api_call(
+            api.get_scheduled_workouts, coming_sunday.year, coming_sunday.month
+        )
+        if success2:
+            items.extend((calendar_data2 or {}).get("calendarItems", []))
+
+    schedule = []
+    curr = today
+    while curr <= coming_sunday:
+        d_str = curr.isoformat()
+        workout = next(
+            (item for item in items if item.get("date") == d_str and item.get("itemType") == "workout"),
+            None
+        )
+        schedule.append({"date": d_str, "workout": workout})
+        curr += datetime.timedelta(days=1)
+
+    return schedule
 
 
 def get_hrv_and_recovery(api: Garmin) -> dict:
