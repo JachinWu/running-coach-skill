@@ -19,10 +19,18 @@ try:
     from . import garmin
     from . import race_goal
     from . import athlete_profile
+    from . import visualizer
+    from . import hrv_guardrail
 except ImportError:
     import garmin
     import race_goal
     import athlete_profile
+    import visualizer
+    import hrv_guardrail
+
+import requests
+import tempfile
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -81,26 +89,37 @@ def speed_to_pace(speed_ms: float) -> str:
 # ---------------------------------------------------------------------------
 
 async def get_today_summary(api) -> str:
-    """Logic for /today command."""
+    """Logic for /today command, providing context for the Dynamic Guardrail."""
     loop = asyncio.get_event_loop()
     workout = await loop.run_in_executor(None, garmin.get_today_scheduled_workout, api)
+    recovery = await loop.run_in_executor(None, garmin.get_hrv_and_recovery, api)
     
     today_label = datetime.date.today().strftime("%Y/%m/%d")
-    if workout is None:
-        return f"📅 <b>{today_label}</b>\n\n✅ 今日為休息日，好好恢復！"
-    elif isinstance(workout, dict) and "error" in workout:
-        return f"❌ 查詢失敗：{escape_html(workout['error'])}"
+    
+    # Format recovery info
+    recovery_info = ""
+    rtype = recovery.get("type", "unavailable")
+    if rtype == "hrv":
+        status_cn = {"balanced": "平衡", "low": "低", "unbalanced": "不平衡", "poor": "差"}.get(recovery.get("status", "").lower(), recovery.get("status"))
+        recovery_info = f"昨夜 HRV: {recovery.get('last_night', 'N/A')} ms (週平均: {recovery.get('weekly_avg', 'N/A')} ms, 狀態: {status_cn})"
+    elif rtype == "body_battery":
+        recovery_info = f"Body Battery: {recovery.get('level', 'N/A')}%"
     else:
-        name = escape_html(
-            workout.get("title") or workout.get("workoutName") or "未命名課表"
-        )
+        recovery_info = "恢復數據暫不可用"
+
+    if workout is None:
+        return f"📅 {today_label}\n今日為休息日。☕\n[恢復狀態]: {recovery_info}"
+    elif isinstance(workout, dict) and "error" in workout:
+        return f"❌ 查詢失敗：{workout['error']}"
+    else:
+        name = workout.get("title") or workout.get("workoutName") or "未命名課表"
         description = workout.get("description", "")
-        text = f"📅 <b>今日課表 ({today_label})</b>\n\n🏃 <b>{name}</b>"
-        if description:
-            if len(description) > 300:
-                description = description[:300] + "..."
-            text += f"\n\n📝 {escape_html(description)}"
-        return text
+        return (
+            f"📅 今日課表 ({today_label})\n"
+            f"🏃 課表內容: {name}\n"
+            f"📝 詳情: {description}\n"
+            f"❤️ [恢復狀態]: {recovery_info}"
+        )
 
 async def get_status_summary(api) -> str:
     """Logic for /status command."""
@@ -189,10 +208,79 @@ async def get_status_summary(api) -> str:
 
     return week_text + schedule_text + recovery_text
 
-async def get_profile_summary() -> str:
+async def get_weekly_report_data(api) -> dict:
+    """Logic for /report command.
+    
+    Returns:
+        Dict with 'caption' and 'photo_path' (temp file), or 'error'.
+    """
+    loop = asyncio.get_event_loop()
+    # Fetch comprehensive data for past 7 days
+    daily_list = await loop.run_in_executor(None, garmin.get_comprehensive_daily_stats, api, 7)
+    
+    if daily_list and isinstance(daily_list[0], dict) and "error" in daily_list[0]:
+        return {"error": daily_list[0]["error"]}
+
+    chart_url = visualizer.get_weekly_chart_url(daily_list)
+    
+    # Download the chart to a temp file
+    temp_dir = tempfile.mkdtemp()
+    photo_path = os.path.join(temp_dir, "weekly_report.png")
+    
+    try:
+        def download():
+            response = requests.get(chart_url, timeout=20)
+            if response.status_code == 200:
+                with open(photo_path, "wb") as f:
+                    f.write(response.content)
+                return True
+            return False
+
+        success = await loop.run_in_executor(None, download)
+        if not success:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return {"error": "無法從 QuickChart 下載綜合圖表圖片"}
+            
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return {"error": f"下載圖表發生錯誤: {e}"}
+
+    # Find latest valid metrics (non-zero load/hrv/bb)
+    latest_metrics = daily_list[-1]
+    for d in reversed(daily_list):
+        if d.get('training_load', 0) > 0 or d.get('hrv', 0) > 0 or d.get('body_battery', 0) > 0:
+            latest_metrics = d
+            break
+
+    # Summary text
+    total_dist = round(sum(d.get('distance_km', 0) for d in daily_list), 2)
+    latest_load = latest_metrics.get('training_load', 0)
+    latest_ratio = round(latest_metrics.get('load_ratio', 0) * 100)
+    latest_hrv = latest_metrics.get('hrv', 0)
+    latest_bb = latest_metrics.get('body_battery', 0)
+    latest_date = latest_metrics.get('date', 'N/A')
+    
+    caption = (
+        f"📊 <b>綜合訓練週報</b>\n"
+        f"📅 截至：{latest_date}\n\n"
+        f"🏃 總里程：<b>{total_dist} km</b>\n"
+        f"📈 最新負荷：{latest_load} (負荷比: {latest_ratio}%)\n"
+        f"❤️ 昨夜 HRV：{latest_hrv} ms\n"
+        f"🔋 Body Battery：{latest_bb}%\n"
+        f"📅 統計區間：{daily_list[0]['date']} ~ {daily_list[-1]['date']}\n\n"
+        f"圖表已整合里程(藍)、負荷比(紅)、HRV(青)與能量指數(黃)。"
+    )
+    
+    return {
+        "caption": caption,
+        "photo_path": photo_path,
+        "temp_dir": temp_dir
+    }
+
+async def get_profile_summary(include_insights: bool = True) -> str:
     """Logic for /profile command."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, athlete_profile.format_profile_summary)
+    return await loop.run_in_executor(None, athlete_profile.format_profile_summary, None, include_insights)
 
 async def get_goal_summary(subcommand: str, args: List[str]) -> str:
     """Logic for /goal command."""
@@ -278,6 +366,10 @@ async def run_post_run_polling(
             if not api:
                 logger.warning("Garmin API not available, skipping check.")
             else:
+                # 1. Check HRV Guardrail (Proactive recovery alert)
+                await hrv_guardrail.run_hrv_guardrail_check(api, send_message_func)
+
+                # 2. Check for new activities (Post-run analysis)
                 loop = asyncio.get_event_loop()
                 activity = await loop.run_in_executor(None, garmin.get_latest_activity, api)
 
@@ -321,6 +413,46 @@ async def run_post_run_polling(
             
         await asyncio.sleep(poll_interval)
 
+async def search_personalized_memory(query: str) -> str:
+    """Search for relevant athlete history using contextual-memory or fallback to local JSON.
+    
+    Args:
+        query: The search query (e.g. current activity highlights or athlete concerns).
+        
+    Returns:
+        Formatted string of relevant insights.
+    """
+    # 1. Try Vector Search (contextual-memory skill)
+    skill_search_script = SKILL_DIR.parent / "contextual-memory" / "scripts" / "search_memory.py"
+    
+    if skill_search_script.exists():
+        try:
+            import subprocess
+            cmd = ["python3", str(skill_search_script), "--query", query, "--type", "running-coach", "--top_k", "3"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0 and result.stdout.strip() and "Top" in result.stdout:
+                # Clean up output to be more prompt-friendly
+                output = result.stdout.strip()
+                return f"\n[相關長期記憶 (向量檢索)]:\n{output}\n"
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}. Falling back to JSON.")
+
+    # 2. Fallback: Local JSON insights from athlete_profile
+    insights = athlete_profile.get_long_term_insights()
+    if insights:
+        # Simple keyword matching for basic "fallback" retrieval
+        query_words = set(re.findall(r'\w+', query.lower()))
+        relevant = []
+        for i in insights:
+            content = i.get("content", "")
+            if any(word in content.lower() for word in query_words) or len(relevant) < 3:
+                relevant.append(f"• {i.get('date', '')} [{i.get('category', 'general')}]: {content}")
+        
+        if relevant:
+            return f"\n[相關長期記憶 (JSON 回退)]:\n" + "\n".join(relevant[:5]) + "\n"
+            
+    return ""
+
 async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
     """Compose a detailed prompt for Gemini analysis based on activity data."""
     activity_id = str(activity.get("activityId", ""))
@@ -345,10 +477,41 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
     avg_pace_str = speed_to_pace(avg_speed)
     max_pace_str = speed_to_pace(max_speed)
 
+    # Fetch Recovery Data for Dynamic Guardrail
+    loop = asyncio.get_event_loop()
+    recovery = await loop.run_in_executor(None, garmin.get_hrv_and_recovery, api)
+    recovery_text = ""
+    rtype = recovery.get("type", "unavailable")
+    if rtype == "hrv":
+        recovery_text = f"昨夜 HRV: {recovery.get('last_night', 'N/A')} ms (狀態: {recovery.get('status', 'unknown')})"
+    elif rtype == "body_battery":
+        recovery_text = f"Body Battery: {recovery.get('level', 'N/A')}%"
+
+    # Fetch Race Goal
+    goal = race_goal.load_goal()
+    goal_text = ""
+    if goal and goal.get("race_date"):
+        days = race_goal.get_days_remaining(goal)
+        dist_str = race_goal.format_distance(goal["race_distance_km"])
+        goal_text = f"近期賽事目標: {goal.get('race_name', dist_str)} ({dist_str}), 日期: {goal['race_date']} (距今 {days} 天, 階段: {race_goal.get_training_phase(days)})"
+
+    prompt = (
+        f"請作為跑步教練，分析以下這場剛完成的活動數據：\n\n"
+        f"活動名稱: {name} ({date_str})\n"
+        f"距離: {dist_km} km\n"
+        f"時間: {dur_min} 分鐘\n"
+        f"平均配速: {avg_pace_str}\n"
+        f"平均心率: {avg_hr} bpm (Max: {max_hr})\n"
+        f"訓練效果: {te_label} (Aerobic: {ae_te}, Anaerobic: {an_te})\n"
+        f"平均步頻: {cadence} spm\n"
+        f"平均步幅: {stride} m\n"
+        f"{recovery_text}\n"
+        f"{goal_text}\n"
+    )
+
     # Try to fetch laps for context
-    laps_text = ""
     try:
-        loop = asyncio.get_event_loop()
+        laps_text = ""
         splits_data = await loop.run_in_executor(None, api.get_activity_splits, int(activity_id))
         laps = splits_data.get("lapDTOs", [])
         if laps:
@@ -363,20 +526,22 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
                 l_stride = lap.get("strideLength", "N/A")
                 l_pace = speed_to_pace(l_speed)
                 laps_text += f"    - L{lap_idx}: {l_dist:.2f}km | {l_dur:.1f}分 | 配速 {l_pace}/km | 心率 {l_hr} | 步頻 {l_cadence} | 步幅 {l_stride}\n"
+            prompt += laps_text
     except Exception as e:
         logger.warning(f"Could not fetch laps for activity {activity_id}: {e}")
 
-    prompt = (
-        f"我剛完成一次跑步訓練（{date_str}）：\n"
-        f"  名稱: {name}\n"
-        f"  距離: {dist_km} km\n"
-        f"  時間: {dur_min} 分鐘\n"
-        f"  平均心率: {avg_hr} bpm (最高 {max_hr} bpm)\n"
-        f"  平均配速: {avg_pace_str} /km (最快 {max_pace_str} /km)\n"
-        f"  平均步頻: {cadence} spm | 步幅: {stride} cm\n"
-        f"  訓練成效(Garmin判定): {te_label} (有氧 TE: {ae_te}, 無氧 TE: {an_te})\n"
-        f"{laps_text}\n"
-        "請以跑步教練的角度，根據以上進階數據給我專業分析與建議。\n"
-        "注意：請檢查這份數據是否打破了我的 PB（個人最佳成績）或達成了重要里程碑。如果是的話，請務必先使用 `python scripts/update_profile.py` 將新紀錄寫入我的個人檔案，再給我回覆！"
+    # Add athlete profile context (exclude insights here to avoid duplication)
+    profile_summary = await get_profile_summary(include_insights=False)
+    prompt += f"\n[跑者個人檔案與近期狀態]:\n{profile_summary}\n"
+    
+    # Add Long-term Personalized Memory (This becomes the ONLY source for insights in the prompt)
+    memory_query = f"{name} {dist_km}km {te_label} {recovery_text}"
+    memory_context = await search_personalized_memory(memory_query)
+    prompt += memory_context
+
+    prompt += (
+        "\n請針對本次跑感、強度、恢復狀況以及與目標賽事的關聯，提供具體分析與下一次訓練的動態建議。\n"
+        "特別注意：請務必根據「長期記憶」中提到的跑者偏好或過往病史進行個性化提醒（例如：避免在特定痛點復發時衝強度）。\n"
+        "如果分析中發現了值得記錄為「長期特質」的新發現（例如：發現跑者在雨天配速反而更穩、或某種補給策略很有效），請在回覆結尾建議我使用 `python3 .gemini/skills/running-coach/scripts/record_insight.py \"發現內容\" --category \"分類\"` 記錄下來。"
     )
     return prompt

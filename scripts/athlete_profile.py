@@ -27,6 +27,7 @@ DEFAULT_PROFILE: dict = {
     "health_notes": [],
     "progress_milestones": [],
     "coaching_notes": [],
+    "long_term_insights": [],  # List of {"date": str, "category": str, "content": str}
     "last_updated": None,
 }
 
@@ -48,7 +49,16 @@ def load_profile() -> dict:
             stored = json.load(f)
         # Merge with defaults to handle schema additions gracefully
         merged = dict(DEFAULT_PROFILE)
-        merged.update(stored)
+        
+        # Deep merge for dictionary keys like personal_bests
+        if "personal_bests" in stored:
+            merged["personal_bests"].update(stored["personal_bests"])
+        
+        # Simple update for other top-level keys
+        for key, value in stored.items():
+            if key != "personal_bests":
+                merged[key] = value
+                
         return merged
     except (json.JSONDecodeError, IOError):
         return dict(DEFAULT_PROFILE)
@@ -266,21 +276,58 @@ def add_milestone(description: str) -> None:
     save_profile(profile)
 
 
+def add_long_term_insight(content: str, category: str = "general") -> None:
+    """Record a long-term insight about the athlete (e.g. preferences, habits).
+
+    Args:
+        content:  The insight content.
+        category: Insight category (e.g. 'preference', 'habit', 'weather').
+    """
+    profile = load_profile()
+    if "long_term_insights" not in profile:
+        profile["long_term_insights"] = []
+        
+    profile["long_term_insights"].append({
+        "date": datetime.date.today().isoformat(),
+        "category": category,
+        "content": content,
+    })
+    # Limit to latest 20 insights if not using vector DB
+    profile["long_term_insights"] = profile["long_term_insights"][-20:]
+    save_profile(profile)
+
+
+def get_long_term_insights(profile: Optional[dict] = None) -> list:
+    """Return all stored long-term insights.
+
+    Args:
+        profile: Optional pre-loaded profile dict.
+
+    Returns:
+        List of insight dicts.
+    """
+    p = profile or load_profile()
+    return p.get("long_term_insights", [])
+
+
 # ---------------------------------------------------------------------------
 # Summary formatter (for display in Telegram / Gemini context)
 # ---------------------------------------------------------------------------
 
-def format_profile_summary(profile: Optional[dict] = None) -> str:
+def format_profile_summary(profile: Optional[dict] = None, include_insights: bool = True) -> str:
     """Return a human-readable Markdown summary of the athlete profile.
 
     Args:
         profile: Optional pre-loaded profile dict.
+        include_insights: Whether to include the long-term insights section.
 
     Returns:
         Formatted Markdown string.
     """
     p = profile or load_profile()
     lines = ["## 🏅 運動員個人檔案\n"]
+
+    # ... (PBs, Physiology, Injuries, Milestones, Coaching notes sections remain the same) ...
 
     # PBs
     pb = p.get("personal_bests", {})
@@ -339,6 +386,15 @@ def format_profile_summary(profile: Optional[dict] = None) -> str:
         lines.append("\n### 📝 教練備忘")
         for n in notes:
             lines.append(f"• {n['date']}：{n['note']}")
+
+    # Long-term insights
+    if include_insights:
+        insights = p.get("long_term_insights", [])
+        if insights:
+            lines.append("\n### 💡 長期特質與偏好")
+            for i in insights:
+                category_tag = f"[{i['category'].upper()}] " if i.get("category") != "general" else ""
+                lines.append(f"• {category_tag}{i['content']}")
 
     lines.append(f"\n*最後更新：{p.get('last_updated', '未知')}*")
     return "\n".join(lines)
