@@ -36,7 +36,8 @@ Execute `python scripts/update_profile.py show` to read the athlete's persistent
     - `python scripts/update_profile.py physiology --vo2max 54.0 --lthr 170 --lt-pace 4:30` (Records physiological metrics history)
     - `python scripts/update_profile.py injury --description "Left knee pain" --notes "Hurts downhill"`
     - `python scripts/update_profile.py resolve-injury --id 1`
-    - `python scripts/update_profile.py note --text "User reported poor sleep this week."`
+    - `python scripts/update_profile.py note --text "User reported poor sleep this week."` (Short-term note)
+    - `python scripts/record_insight.py "Prefers morning runs on weekends" --category preference` (Long-term trait, syncs to Vector DB)
     - `python scripts/update_profile.py milestone --description "First 30km long run"`
 
 ### 1b. Recovery Assessment (Dynamic Guardrail 🛡️)
@@ -143,6 +144,7 @@ today_text = await bot_bridge.get_today_summary(api)
 status_text = await bot_bridge.get_status_summary(api)
 profile_text = await bot_bridge.get_profile_summary()
 goal_text = await bot_bridge.get_goal_summary(subcommand="show", args=[])
+report_data = await bot_bridge.get_weekly_report_data(api) # Dict: {"caption": "...", "photo_path": "..."}
 ```
 
 ### Background Polling
@@ -161,6 +163,9 @@ await bot_bridge.run_post_run_polling(
 - **Scripts**:
     - `get_recent_runs.py`: Fetches Garmin activity summaries from the last N days.
     - `garmin.py`: Core Garmin Connect utility — auth, workout upload, schedule management, and query helpers (`get_today_scheduled_workout`, `get_weekly_summary`, `get_hrv_and_recovery`, `get_latest_activity`).
+    - `record_insight.py`: Saves long-term insights to JSON and syncs to Contextual Memory (Vector DB).
+    - `hrv_guardrail.py`: Standalone check for HRV dynamic guardrail alerts.
+    - `visualizer.py`: Generates chart images for weekly training reports using QuickChart.
     - `upload_calendar.py`: Optional Google Calendar integration (event upload or calendar→Garmin sync).
 - **Data**:
     - `.gemini/skills/running-coach/data/race_goal.json`: Persisted race goal (set via Telegram `/goal set` command).

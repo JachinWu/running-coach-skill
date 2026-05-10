@@ -24,9 +24,11 @@ A specialized AI running coach for analyzing data, planning workouts, and syncin
 - **PB Tracking**: Keeps a history of your Personal Bests across various distances.
 - **Injury Management**: Tracks injury history to adjust training intensity and prevent overtraining.
 - **Physiological Trends**: Monitors VO2Max and Lactate Threshold (LTHR) progress.
+- **Vector Memory Sync**: Integrates with `contextual-memory` to store long-term traits and habits.
 - **PB 紀錄**：紀錄您在不同距離的個人最佳紀錄。
 - **傷病管理**：追蹤傷病史以調整訓練強度，預防過度訓練。
 - **生理趨勢**：監測最大攝氧量 (VO2Max) 與乳酸閥值 (LTHR) 的進展。
+- **向量記憶同步**：與 `contextual-memory` 整合，儲存長期跑者特質與習慣。
 
 ### ⚡ Recovery & Readiness | 恢復與就緒度
 - **HRV & Body Battery**: Integrates Garmin recovery metrics to decide if you are ready for a hard session or need a rest day.
@@ -44,6 +46,9 @@ A specialized AI running coach for analyzing data, planning workouts, and syncin
   - `garmin.py`: Core utility for Garmin Connect API interactions. | Garmin Connect API 核心工具。
   - `get_recent_runs.py`: Retrieves recent activity history. | 獲取近期活動紀錄。
   - `update_profile.py`: Manages the athlete's persistent memory. | 管理運動員持久化記憶。
+  - `record_insight.py`: Saves long-term insights and syncs with contextual-memory. | 儲存長期洞察並與上下文記憶同步。
+  - `hrv_guardrail.py`: Proactive recovery alerts and guardrail logic. | 主動恢復預警與保護機制。
+  - `visualizer.py`: Generates weekly training and recovery charts. | 生成每週訓練與恢復圖表。
   - `bot_bridge.py`: Integration layer for Telegram/Chat interfaces. | Telegram/對話介面整合層。
   - `upload_calendar.py`: Google Calendar synchronization (Optional). | Google 日曆同步（選用）。
 - `data/`:
