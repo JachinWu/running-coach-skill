@@ -11,6 +11,7 @@ import datetime
 import asyncio
 import logging
 import re
+import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Coroutine
 
@@ -74,6 +75,16 @@ def save_last_activity_id(activity_id: str) -> None:
 def escape_html(text: str) -> str:
     """Escape HTML special characters."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Telegram MarkdownV2."""
+    # Note: We are using Markdown (not V2) in send_message_robust usually, 
+    # but telegram's parse_mode='Markdown' also has issues with certain chars.
+    # For 'Markdown', escaping is simpler than V2.
+    chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 def speed_to_pace(speed_ms: float) -> str:
     """Convert speed in m/s to pace (min:sec) per km."""
@@ -406,14 +417,15 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
 
 async def run_post_run_polling(
     get_api_func: Callable[[], Any],
-    send_message_func: Callable[[str, Optional[Any]], Coroutine[Any, Any, None]],
+    send_message_func: Callable[[str, Optional[Any], Optional[str]], Coroutine[Any, Any, Optional[int]]],
     poll_interval: int = 900
 ):
     """Periodically check for new Garmin activities and trigger analysis.
     
     Args:
         get_api_func: Function that returns an authenticated Garmin API object.
-        send_message_func: Async function to send a message to the user (text, optional keyboard).
+        send_message_func: Async function to send a message (text, keyboard, session_id). 
+                           Returns message_id if successful.
         poll_interval: Seconds between checks.
     """
     last_known_id = load_last_activity_id()
@@ -426,10 +438,8 @@ async def run_post_run_polling(
                 logger.warning("Garmin API not available, skipping check.")
             else:
                 # 1. Check HRV Guardrail (Proactive recovery alert)
-                # Pass a wrapper to match the expected single-arg signature of run_hrv_guardrail_check if needed,
-                # but hrv_guardrail might need update too if it calls send_message_func.
                 async def send_simple(text: str):
-                    await send_message_func(text, None)
+                    await send_message_func(text, None, None)
                 await hrv_guardrail.run_hrv_guardrail_check(api, send_simple)
 
                 # 2. Check for new activities (Post-run analysis)
@@ -441,10 +451,11 @@ async def run_post_run_polling(
                     if activity_id != last_known_id:
                         act_type = activity.get("activityType", {}).get("typeKey", "")
                         if act_type in ("running", "treadmill_running"):
+                            session_id = uuid.uuid4().hex
                             prompt = await compose_analysis_prompt(api, activity)
                             
-                            # Execute Gemini CLI
-                            cmd = ["gemini", "--skip-trust", "--approval-mode", "yolo", "-p", prompt]
+                            # Execute Gemini CLI with session_id
+                            cmd = ["gemini", "--skip-trust", "--approval-mode", "yolo", "--session-id", session_id, "-p", prompt]
                             process = await asyncio.create_subprocess_exec(
                                 *cmd,
                                 stdin=asyncio.subprocess.DEVNULL,
@@ -464,12 +475,13 @@ async def run_post_run_polling(
                                     f"🏃 *跑後自動分析* — {date_str}\n"
                                     f"📏 {dist_km} km ｜ ⏱ {dur_min} 分 ｜ ❤️ {avg_hr} bpm\n\n"
                                 )
-                                await send_message_func(header + output, None)
+                                # Send analysis and associate session
+                                await send_message_func(header + output, None, session_id)
                                 
-                                # Send RPE follow-up
+                                # Send RPE follow-up and associate with the SAME session
                                 rpe_text = "*教練詢問*：這趟跑起來體感如何？請點選 RPE 強度（1 最輕鬆，10 全力）："
                                 rpe_keyboard = get_rpe_keyboard_data(activity_id)
-                                await send_message_func(rpe_text, rpe_keyboard)
+                                await send_message_func(rpe_text, rpe_keyboard, session_id)
                                 
                                 last_known_id = activity_id
                                 save_last_activity_id(activity_id)
@@ -609,6 +621,6 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
     prompt += (
         "\n請針對本次跑感、強度、恢復狀況以及與目標賽事的關聯，提供具體分析與下一次訓練的動態建議。\n"
         "特別注意：請務必根據「長期記憶」中提到的跑者偏好或過往病史進行個性化提醒（例如：避免在特定痛點復發時衝強度）。\n"
-        "如果分析中發現了值得記錄為「長期特質」的新發現（例如：發現跑者在雨天配速反而更穩、或某種補給策略很有效），請在回覆結尾建議我使用 `python3 .gemini/skills/running-coach/scripts/record_insight.py \"發現內容\" --category \"分類\"` 記錄下來。"
+        "如果分析中發現了值得記錄為「長期特質」的新發現（例如：發現跑者在雨天配速反而更穩、或某種補給策略很有效），請在回覆結尾主動詢問跑者是否要將此特質記錄到長期記憶中（例如：『教練發現您...，是否需要教練幫您記錄下來呢？』）。請勿輸出任何 shell script 或程式碼指令。"
     )
     return prompt
