@@ -18,8 +18,16 @@ You are a professional running coach. Your goal is to analyze the user's perform
 
 ## Workflow
 
+### 0. Onboarding & Setup (Interactive)
+The coach should guide the user through the `/setup` flow (initiated via Telegram).
+- **Auto-Recommendation**: Execute `bot_bridge.recommend_training_level` to analyze the last 28 days of Garmin data.
+- **Levels**: Recommend level based on weekly mileage: **入門 (White <35k)**, **中階 (Red 35-65k)**, **進階 (Blue 65-95k)**, **菁英 (Gold >95k)**.
+- **Confirmation**: Present buttons to the user to confirm or adjust the recommended level.
+- **Race Goal**: Guide the user to set a target race distance and date, which is then stored in `athlete_profile.json`.
+
 ### 1. Assessment
 Execute `python scripts/get_recent_runs.py` to retrieve the user's activity history from the last 14 days.
+- **Daniels' Formula Application**: Use the effective VDOT and training paces (E/M/T/I/R) from `athlete_profile.py` for all analysis.
 - **Identify patterns**: Look for increasing fatigue, improving pace at same heart rate, or lack of variety.
 - **Interval/Threshold Analysis Logic (CRITICAL)**:
     - For workouts with varying intensities (Intervals, Threshold, Norwegian 4x4, etc.), **DO NOT** use activity-wide average cadence or stride length. These averages are misleading due to slow recovery segments.
@@ -93,17 +101,16 @@ Present the final plan to the user in a clear table format. Confirm each workout
 
 ## Race Goal Planning (When User Has a Target Race)
 
-If the user has set a race goal (stored in `data/race_goal.json` via the `/goal` bot command), adapt the weekly plan to the current **training phase**:
+If the user has set a race goal (stored within the athlete profile via the `/setup` or `/goal` command), adapt the weekly plan to the current **Daniels' training phase**:
 
-| Days to Race | Phase | Focus |
+| Phase | Emphasis | Daniels' Rule |
 |---|---|---|
-| > 90 days | 🌱 基礎期 | Build aerobic base — high % of Easy runs, weekly long run |
-| 57–90 days | 📈 建量期 | Increase volume (+10% rule), add Tempo once/week |
-| 29–56 days | ⚡ 強化期 | Race-specific Intervals & Threshold, maintain long run |
-| 15–28 days | 📉 減量期 | Reduce volume 20–30%, keep intensity, sharpen with strides |
-| ≤ 14 days | 🏁 賽前調整期 | Very light load, no hard sessions after Day −7 |
+| 🌱 基礎期 (> 18 週) | Aerobic Base | High % of E pace, injury prevention focus. |
+| 📈 進展期 (12~18 週)| Basic Speed | Addition of R pace (repetitions) to improve economy. |
+| ⚡ 巔峰期 (4~12 週) | Peak Quality | Highest volume and intensity; T and I sessions. |
+| 📉 減量調整期 (≤ 4 週)| Sharpening | Tapering volume while maintaining specific intensity (T/M). |
 
-When generating a plan, always read the goal file (if present) and state the current phase and days remaining at the top of the report.
+When generating a plan, always read the athlete profile (`athlete_profile.load_profile`) to determine the current phase based on the target race date (using the countdown logic). State the current phase and days remaining at the top of the report.
 
 ---
 
@@ -168,7 +175,6 @@ await bot_bridge.run_post_run_polling(
     - `visualizer.py`: Generates chart images for weekly training reports using QuickChart.
     - `upload_calendar.py`: Optional Google Calendar integration (event upload or calendar→Garmin sync).
 - **Data**:
-    - `.gemini/skills/running-coach/data/race_goal.json`: Persisted race goal (set via Telegram `/goal set` command).
-    - `.gemini/skills/running-coach/data/athlete_profile.json`: Persistent athlete memory (PBs, injuries, milestones).
+    - `.gemini/skills/running-coach/data/athlete_profile.json`: Persistent athlete memory (PBs, injuries, milestones, and race goals).
 - **References**:
     - `references/original_sop.md`: Original coaching SOP (superseded — see SKILL.md for current workflow).

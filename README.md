@@ -35,8 +35,10 @@ A specialized AI running coach for analyzing data, planning workouts, and syncin
 - **HRV 與身體能量**：整合 Garmin 恢復指標，判斷您適合進行高強度訓練還是需要休息。
 
 ### 🏁 Race Goal Planning | 賽事備賽規劃
-- **Periodization**: Automatically adjusts training phases (Base, Build, Peak, Taper) based on your target race date.
-- **週期化訓練**：根據您的目標賽事日期，自動調整訓練階段（基礎期、建量期、強化期、減量期）。
+- **Daniels' Periodization**: Automatically adjusts training phases (Foundation, Early Quality, Transition, Final Quality) and paces based on Daniels' Running Formula and your target race date.
+- **Training Levels**: Recommends training levels (White, Red, Blue, Gold) based on your actual 4-week mileage to prevent overtraining.
+- **丹尼爾斯週期化**：根據丹尼爾斯跑步方程式與您的目標賽事日期，自動調整訓練階段（基礎期、進展期、巔峰期、減量期）與科學配速。
+- **訓練分級**：根據您過去 4 週的真實跑量推薦級別（入門、中階、進階、菁英），確保訓練負荷適中。
 
 ---
 
@@ -45,6 +47,8 @@ A specialized AI running coach for analyzing data, planning workouts, and syncin
 - `scripts/`:
   - `garmin.py`: Core utility for Garmin Connect API interactions. | Garmin Connect API 核心工具。
   - `get_recent_runs.py`: Retrieves recent activity history. | 獲取近期活動紀錄。
+  - `daniels_periodization.py`: Daniels' training phases and level constants. | 丹尼爾斯週期與等級常數。
+  - `daniels_formula.py`: VDOT and pace calculation engine. | VDOT 與配速計算引擎。
   - `update_profile.py`: Manages the athlete's persistent memory. | 管理運動員持久化記憶。
   - `record_insight.py`: Saves long-term insights and syncs with contextual-memory. | 儲存長期洞察並與上下文記憶同步。
   - `hrv_guardrail.py`: Proactive recovery alerts and guardrail logic. | 主動恢復預警與保護機制。
@@ -52,8 +56,7 @@ A specialized AI running coach for analyzing data, planning workouts, and syncin
   - `bot_bridge.py`: Integration layer for Telegram/Chat interfaces. | Telegram/對話介面整合層。
   - `upload_calendar.py`: Google Calendar synchronization (Optional). | Google 日曆同步（選用）。
 - `data/`:
-  - `athlete_profile.json`: Persistent storage for PBs, injuries, and stats. | PB、傷病與統計數據的持久化存儲。
-  - `race_goal.json`: Storage for current target race information. | 當前目標賽事資訊存儲。
+  - `athlete_profile.json`: Persistent storage for PBs, injuries, stats, and target race goals. | PB、傷病、統計數據與賽事目標的持久化存儲。
 - `references/`: Detailed SOPs and implementation plans. | 詳細的 SOP 與實作計畫。
 
 ---
@@ -82,6 +85,7 @@ The skill is designed to be triggered by the Gemini CLI agent. You can also run 
 
 此技能設計由 Gemini CLI 代理觸發。您也可以手動執行個別腳本進行管理：
 
+- **Onboarding/Setup**: `/setup` (via Telegram) or manually via `bot_bridge`.
 - **Check Profile**: `python scripts/update_profile.py show`
 - **Manual Sync**: `python scripts/garmin.py --workout-json '<JSON_DATA>'`
 - **View Recent Runs**: `python scripts/get_recent_runs.py`

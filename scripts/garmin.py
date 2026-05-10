@@ -196,13 +196,13 @@ class WorkoutFactory:
         # WARNING: Use 'recovery' ONLY for passive rest breaks inside repeat groups.
         # ALL primary running segments (easy run, tempo, long run) must use 'interval'
         # so the watch displays "跑步" (Run), not "恢復".
-        type_id_map = {"warmup": 1, "cooldown": 2, "recovery": 3, "interval": 4}
+        type_id_map = {"warmup": 1, "cooldown": 2, "recovery": 4, "interval": 3}
 
         step = {
             "type": "ExecutableStepDTO",
             "stepOrder": order_idx,
             "stepType": {
-                "stepTypeId": type_id_map.get(step_type_key, 4),
+                "stepTypeId": type_id_map.get(step_type_key, 3),
                 "stepTypeKey": step_type_key,
                 "displayOrder": 1,
             },
@@ -607,6 +607,9 @@ def get_upcoming_schedule(api: Garmin) -> list:
     """
     today = date.today()
     days_until_sunday = (6 - today.weekday()) % 7
+    # If today is Sunday, look ahead to the next Sunday (7 days)
+    if days_until_sunday == 0:
+        days_until_sunday = 7
     coming_sunday = today + datetime.timedelta(days=days_until_sunday)
 
     # Fetch workouts for current month

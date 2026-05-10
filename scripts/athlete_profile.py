@@ -6,8 +6,20 @@ Used by both the Telegram bot and the Gemini CLI running-coach skill.
 
 import json
 import datetime
+import copy
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
+
+# Import daniels_formula for VDOT calculations
+try:
+    import daniels_formula
+    import daniels_periodization
+except ImportError:
+    # Handle cases where path might need adjustment
+    import sys
+    sys.path.append(str(Path(__file__).resolve().parent))
+    import daniels_formula
+    import daniels_periodization
 
 DATA_DIR: Path = Path(__file__).resolve().parent.parent / "data"
 PROFILE_FILE: Path = DATA_DIR / "athlete_profile.json"
@@ -22,6 +34,14 @@ DEFAULT_PROFILE: dict = {
         "half_marathon":  [],
         "marathon":       [],
     },
+    "vdot": None,
+    "training_paces": {},  # {"E": "5:30", "M": "4:45", ...}
+    "training_level": "WHITE", # WHITE, RED, BLUE, GOLD
+    "target_race_date": None,  # ISO date string
+    "current_phase": "I",      # I, II, III, IV
+    "last_activity_date": None, # ISO date string of last Garmin activity
+    "target_race_distance_km": 42.195,
+    "target_race_name": "",
     "physiology_history": [],  # List of {"date": str, "vo2max": float/None, "lthr": int/None, "lt_pace": str/None}
     "injuries": [],
     "health_notes": [],
@@ -44,12 +64,13 @@ def load_profile() -> dict:
         Full athlete profile dict.
     """
     if not PROFILE_FILE.exists():
-        return dict(DEFAULT_PROFILE)
+        return copy.deepcopy(DEFAULT_PROFILE)
     try:
         with open(PROFILE_FILE, "r", encoding="utf-8") as f:
             stored = json.load(f)
-        # Merge with defaults to handle schema additions gracefully
-        merged = dict(DEFAULT_PROFILE)
+        
+        # Start with a fresh deep copy of defaults
+        merged = copy.deepcopy(DEFAULT_PROFILE)
         
         # Deep merge for dictionary keys like personal_bests
         if "personal_bests" in stored:
@@ -59,10 +80,16 @@ def load_profile() -> dict:
         for key, value in stored.items():
             if key != "personal_bests":
                 merged[key] = value
-                
+        
+        # Migration: If VDOT is missing but PBs exist, trigger a refresh
+        if merged.get("vdot") is None:
+            if _refresh_vdot_logic(merged):
+                # Save the updated profile with VDOT
+                save_profile(merged)
+
         return merged
     except (json.JSONDecodeError, IOError):
-        return dict(DEFAULT_PROFILE)
+        return copy.deepcopy(DEFAULT_PROFILE)
 
 
 def save_profile(profile: dict) -> None:
@@ -75,6 +102,69 @@ def save_profile(profile: dict) -> None:
     profile["last_updated"] = datetime.date.today().isoformat()
     with open(PROFILE_FILE, "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# VDOT & Pace Management
+# ---------------------------------------------------------------------------
+
+def _parse_time_to_seconds(time_str: str) -> int:
+    """Convert time string (HH:MM:SS or MM:SS) to total seconds."""
+    parts = time_str.split(":")
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    elif len(parts) == 2:
+        return int(parts[0]) * 60 + int(parts[1])
+    return 0
+
+
+def _refresh_vdot_logic(profile: dict) -> bool:
+    """Internal logic to recalculate VDOT and paces for a profile dict.
+    Returns True if changes were made.
+    """
+    pbs = profile.get("personal_bests", {})
+    max_vdot = 0.0
+    
+    distance_map = {
+        "5k": 5000,
+        "10k": 10000,
+        "half_marathon": 21097.5,
+        "marathon": 42195
+    }
+    
+    for dist, entries in pbs.items():
+        if not entries:
+            continue
+        
+        # Use the latest PB entry for that distance
+        latest_pb = entries[-1]
+        try:
+            seconds = _parse_time_to_seconds(latest_pb["time"])
+            if seconds > 0:
+                dist_m = distance_map.get(dist, 0)
+                vdot = daniels_formula.calculate_vdot(dist_m, seconds)
+                if vdot > max_vdot:
+                    max_vdot = vdot
+        except Exception:
+            continue
+            
+    if max_vdot > 0:
+        profile["vdot"] = max_vdot
+        profile["training_paces"] = daniels_formula.calculate_paces(max_vdot)
+        return True
+    return False
+
+
+def refresh_vdot_and_paces() -> dict:
+    """Recalculate VDOT and paces based on the best current PB.
+
+    Returns:
+        Updated profile dictionary.
+    """
+    profile = load_profile()
+    if _refresh_vdot_logic(profile):
+        save_profile(profile)
+    return profile
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +294,10 @@ def update_pb(distance: str, time: str, date: Optional[str] = None, race: Option
     profile["personal_bests"][key].sort(key=lambda x: x.get("date", ""))
     
     save_profile(profile)
+    
+    # Auto-refresh VDOT and paces after updating PB
+    refresh_vdot_and_paces()
+    
     return entry
 
 
@@ -377,6 +471,212 @@ def get_long_term_insights(profile: Optional[dict] = None) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Training Management (Levels, Phases, Goals)
+# ---------------------------------------------------------------------------
+
+# Standard race distances in km
+STANDARD_DISTANCES: dict[str, float] = {
+    "5k": 5.0,
+    "5km": 5.0,
+    "10k": 10.0,
+    "10km": 10.0,
+    "hm": 21.0975,
+    "half": 21.0975,
+    "21k": 21.0975,
+    "21km": 21.0975,
+    "fm": 42.195,
+    "full": 42.195,
+    "42k": 42.195,
+    "42km": 42.195,
+    "marathon": 42.195,
+}
+
+
+def parse_distance(raw: str) -> float:
+    """Parse a distance string into km as a float.
+
+    Accepts shorthand (e.g. '42k', 'hm', 'marathon') or a plain number.
+
+    Args:
+        raw: Distance string from user input.
+
+    Returns:
+        Distance in kilometres as float.
+
+    Raises:
+        ValueError: If the string cannot be parsed.
+    """
+    key = raw.lower().strip()
+    if key in STANDARD_DISTANCES:
+        return STANDARD_DISTANCES[key]
+    # Strip trailing 'k' or 'km' and parse as float
+    for suffix in ("km", "k"):
+        if key.endswith(suffix):
+            try:
+                return float(key[: -len(suffix)])
+            except ValueError:
+                continue
+    try:
+        return float(key)
+    except ValueError:
+        raise ValueError(f"無法解析距離：{raw}")
+
+
+def format_distance(km: float) -> str:
+    """Return a human-readable distance label.
+
+    Args:
+        km: Distance in kilometres.
+
+    Returns:
+        Formatted label string (e.g. '全程馬拉松 (42.195 km)').
+    """
+    labels: dict[float, str] = {
+        42.195: "全程馬拉松 (42.195 km)",
+        21.0975: "半程馬拉松 (21.0975 km)",
+        10.0: "10 km",
+        5.0: "5 km",
+    }
+    return labels.get(km, f"{km} km")
+
+
+def get_training_phase_name(days_remaining: int) -> str:
+    """Determine the current training phase name based on days until race.
+
+    Args:
+        days_remaining: Days from today to race day.
+
+    Returns:
+        Emoji + phase name string.
+    """
+    if days_remaining > 90:
+        return "🌱 基礎期"
+    if days_remaining > 56:
+        return "📈 建量期"
+    if days_remaining > 28:
+        return "⚡ 強化期"
+    if days_remaining > 14:
+        return "📉 減量期"
+    return "🏁 賽前調整期"
+
+
+def load_goal() -> Optional[dict]:
+    """Load the saved race goal from the athlete profile.
+
+    Returns:
+        Goal dict, or None if no goal has been set.
+    """
+    profile = load_profile()
+    if not profile.get("target_race_date"):
+        return None
+
+    return {
+        "race_date": profile.get("target_race_date"),
+        "race_distance_km": profile.get("target_race_distance_km", 42.195),
+        "race_name": profile.get("target_race_name", ""),
+    }
+
+
+def save_goal(race_date: str, race_distance_km: float, race_name: str = "") -> dict:
+    """Persist a race goal to the athlete profile.
+
+    Args:
+        race_date: ISO-format date string (YYYY-MM-DD).
+        race_distance_km: Race distance in kilometres.
+        race_name: Optional human-readable name for the race.
+
+    Returns:
+        The saved goal dict.
+    """
+    profile = load_profile()
+
+    profile["target_race_date"] = race_date
+    profile["target_race_distance_km"] = race_distance_km
+    profile["target_race_name"] = race_name
+
+    # Save directly first to ensure custom fields are there
+    save_profile(profile)
+
+    # Let athlete_profile handle the phase recalculation logic
+    update_training_settings(target_race_date=race_date)
+
+    return {
+        "race_date": race_date,
+        "race_distance_km": race_distance_km,
+        "race_name": race_name,
+    }
+
+
+def get_days_remaining(race_date_str: str) -> int:
+    """Calculate days from today until the race date.
+
+    Args:
+        race_date_str: ISO date string (YYYY-MM-DD).
+
+    Returns:
+        Number of days remaining (negative if race has passed).
+    """
+    race_date = datetime.date.fromisoformat(race_date_str)
+    return (race_date - datetime.date.today()).days
+
+
+def get_effective_vdot(profile: Optional[dict] = None) -> tuple[float, float]:
+    """Calculate effective VDOT adjusted for detraining.
+    
+    Returns:
+        tuple: (base_vdot, effective_vdot)
+    """
+    p = profile or load_profile()
+    base_vdot = p.get("vdot") or 0.0
+    if base_vdot <= 0:
+        return 0.0, 0.0
+        
+    last_date_str = p.get("last_activity_date")
+    if not last_date_str:
+        return base_vdot, base_vdot
+        
+    try:
+        last_date = datetime.date.fromisoformat(last_date_str)
+        days_missed = (datetime.date.today() - last_date).days
+        multiplier = daniels_periodization.get_detraining_vdot_multiplier(days_missed)
+        return base_vdot, round(base_vdot * multiplier, 2)
+    except Exception:
+        return base_vdot, base_vdot
+
+
+def update_training_settings(
+    level: Optional[str] = None,
+    target_race_date: Optional[str] = None
+) -> dict:
+    """Update training level, target race date, and recalculate current phase.
+
+    Args:
+        level: 'WHITE', 'RED', 'BLUE', or 'GOLD'.
+        target_race_date: ISO date string of the goal race.
+
+    Returns:
+        Updated profile dict.
+    """
+    profile = load_profile()
+    if level:
+        profile["training_level"] = level.upper()
+    
+    if target_race_date:
+        profile["target_race_date"] = target_race_date
+
+    # Recalculate Phase based on target race date
+    if profile.get("target_race_date"):
+        try:
+            trd = datetime.date.fromisoformat(profile["target_race_date"])
+            profile["current_phase"] = daniels_periodization.calculate_current_phase(trd)
+        except Exception:
+            pass
+
+    save_profile(profile)
+    return profile
+
+
+# ---------------------------------------------------------------------------
 # Summary formatter (for display in Telegram / Gemini context)
 # ---------------------------------------------------------------------------
 
@@ -392,6 +692,53 @@ def format_profile_summary(profile: Optional[dict] = None, include_insights: boo
     """
     p = profile or load_profile()
     lines = ["## 🏅 運動員個人檔案\n"]
+
+    # Training Context (Level & Phase)
+    level_code = p.get("training_level", "WHITE")
+    phase = p.get("current_phase", "I")
+    target = p.get("target_race_date")
+    
+    level_map = {"WHITE": "入門", "RED": "中階", "BLUE": "進階", "GOLD": "菁英"}
+    level_display = level_map.get(level_code, level_code)
+    
+    level_info = daniels_periodization.get_level_info(level_code)
+    phase_info = daniels_periodization.get_phase_advice(phase)
+    
+    lines.append(f"### 🏃‍♂️ 訓練狀態：**{level_display} 級別**")
+    lines.append(f"• **當前週期**：Phase {phase} ({phase_info['name']})")
+    if target:
+        try:
+            trd = datetime.date.fromisoformat(target)
+            days_left = (trd - datetime.date.today()).days
+            lines.append(f"• **目標賽事**：{target} (剩餘 {days_left} 天)")
+        except Exception:
+            pass
+    lines.append(f"• **級別特性**：{level_info['description']} (週跑量上限 {level_info['max_weekly_km']}km)")
+    lines.append("")
+
+    # Daniels VDOT & Paces
+    base_vdot, effective_vdot = get_effective_vdot(p)
+    paces = p.get("training_paces", {})
+    
+    if effective_vdot > 0:
+        vdot_display = f"**{effective_vdot}**"
+        if effective_vdot < base_vdot:
+            vdot_display += f" (⚠️ 體能衰減中，原始: {base_vdot})"
+            # Recalculate paces based on effective VDOT for display
+            paces = daniels_formula.calculate_paces(effective_vdot)
+            
+        lines.append(f"### 📈 丹尼爾斯跑力 (VDOT: {vdot_display})")
+        if paces:
+            lines.append("```")
+            lines.append("| 區間 | 說明 | 參考配速 (/km) |")
+            lines.append("| :--- | :--- | :--- |")
+            lines.append(f"|  E   | 輕鬆跑 (Easy)     | {paces.get('E', 'N/A'):>8} |")
+            lines.append(f"|  M   | 馬拉松 (Marathon) | {paces.get('M', 'N/A'):>8} |")
+            lines.append(f"|  T   | 乳酸閾值 (Threshold)| {paces.get('T', 'N/A'):>8} |")
+            lines.append(f"|  I   | 間歇訓練 (Interval) | {paces.get('I', 'N/A'):>8} |")
+            lines.append(f"|  R   | 無氧反覆 (Repetition)| {paces.get('R', 'N/A'):>8} |")
+            lines.append("```")
+        lines.append("")
 
     # Recent activity feedback (RPE)
     feedback = p.get("activity_feedback", [])

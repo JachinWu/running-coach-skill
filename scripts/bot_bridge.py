@@ -18,13 +18,11 @@ from typing import Optional, List, Dict, Any, Callable, Coroutine
 # Import sibling modules
 try:
     from . import garmin
-    from . import race_goal
     from . import athlete_profile
     from . import visualizer
     from . import hrv_guardrail
 except ImportError:
     import garmin
-    import race_goal
     import athlete_profile
     import visualizer
     import hrv_guardrail
@@ -347,6 +345,49 @@ async def get_weekly_report_data(api) -> dict:
         "temp_dir": temp_dir
     }
 
+
+async def recommend_training_level(api) -> dict:
+    """Analyze past 4 weeks of running data and recommend a training level.
+
+    Returns:
+        Dict with 'avg_weekly_km' and 'recommended_level'.
+    """
+    loop = asyncio.get_event_loop()
+    # Fetch 28 days (4 weeks) of daily stats
+    daily_list = await loop.run_in_executor(None, garmin.get_comprehensive_daily_stats, api, 28)
+
+    if not daily_list or (isinstance(daily_list[0], dict) and "error" in daily_list[0]):
+        return {"error": daily_list[0].get("error", "無法獲取數據") if daily_list else "無數據"}
+
+    total_km = sum(d.get("distance_km", 0) for d in daily_list)
+    avg_weekly_km = round(total_km / 4, 1)
+
+    # Recommendation logic:
+    # < 35 km/週 ➔ 入門 (WHITE)
+    # 35 ~ 65 km/週 ➔ 中階 (RED)
+    # 65 ~ 95 km/週 ➔ 進階 (BLUE)
+    # > 95 km/週 ➔ 菁英 (GOLD)
+
+    if avg_weekly_km < 35:
+        level_code = "WHITE"
+        level_name = "入門"
+    elif avg_weekly_km < 65:
+        level_code = "RED"
+        level_name = "中階"
+    elif avg_weekly_km < 95:
+        level_code = "BLUE"
+        level_name = "進階"
+    else:
+        level_code = "GOLD"
+        level_name = "菁英"
+
+    return {
+        "avg_weekly_km": avg_weekly_km,
+        "recommended_level_code": level_code,
+        "recommended_level_name": level_name
+    }
+
+
 async def get_profile_summary(include_insights: bool = True) -> str:
     """Logic for /profile command."""
     loop = asyncio.get_event_loop()
@@ -364,14 +405,14 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
         try:
             race_date_str = args[0]
             datetime.date.fromisoformat(race_date_str)  # validate format
-            distance_km = race_goal.parse_distance(args[1])
+            dist_km = athlete_profile.parse_distance(args[1])
             race_name = " ".join(args[2:]) if len(args) > 2 else ""
         except (ValueError, IndexError) as e:
             return f"❌ 輸入格式有誤：{escape_html(str(e))}"
 
-        goal = race_goal.save_goal(race_date_str, distance_km, race_name)
-        days = race_goal.get_days_remaining(goal)
-        dist_str = race_goal.format_distance(distance_km)
+        goal = athlete_profile.save_goal(race_date_str, dist_km, race_name)
+        days = athlete_profile.get_days_remaining(race_date_str)
+        dist_str = athlete_profile.format_distance(dist_km)
         display_name = race_name or dist_str
         return (
             f"🎯 <b>賽事目標已儲存！</b>\n\n"
@@ -379,11 +420,11 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
             f"• 距離：{escape_html(dist_str)}\n"
             f"• 日期：{escape_html(race_date_str)}\n"
             f"• 距今：<b>{days} 天</b>\n"
-            f"• 訓練階段：{escape_html(race_goal.get_training_phase(days))}"
+            f"• 訓練階段：{escape_html(athlete_profile.get_training_phase_name(days))}"
         )
     else:
         # show
-        goal = race_goal.load_goal()
+        goal = athlete_profile.load_goal()
         if not goal or not goal.get("race_date"):
             return (
                 "📭 尚未設定賽事目標。\n\n"
@@ -391,8 +432,8 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
                 "例：<code>/goal set 2026-11-01 42</code>"
             )
 
-        days = race_goal.get_days_remaining(goal)
-        dist_str = race_goal.format_distance(goal["race_distance_km"])
+        days = athlete_profile.get_days_remaining(goal["race_date"])
+        dist_str = athlete_profile.format_distance(goal["race_distance_km"])
         display_name = goal.get("race_name") or dist_str
 
         if days < 0:
@@ -408,7 +449,7 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
             f"• 距離：{escape_html(dist_str)}\n"
             f"• 日期：{escape_html(goal['race_date'])}\n\n"
             f"{countdown}\n"
-            f"• 訓練階段：{escape_html(race_goal.get_training_phase(days))}"
+            f"• 訓練階段：{escape_html(athlete_profile.get_training_phase_name(days))}"
         )
 
 # ---------------------------------------------------------------------------
@@ -451,6 +492,11 @@ async def run_post_run_polling(
                     if activity_id != last_known_id:
                         act_type = activity.get("activityType", {}).get("typeKey", "")
                         if act_type in ("running", "treadmill_running"):
+                            # Update last activity date in profile
+                            profile = athlete_profile.load_profile()
+                            profile["last_activity_date"] = activity.get("startTimeLocal", "")[:10]
+                            athlete_profile.save_profile(profile)
+
                             session_id = uuid.uuid4().hex
                             prompt = await compose_analysis_prompt(api, activity)
                             
@@ -507,7 +553,7 @@ async def search_personalized_memory(query: str) -> str:
     if skill_search_script.exists():
         try:
             import subprocess
-            cmd = ["python3", str(skill_search_script), "--query", query, "--type", "running-coach", "--top_k", "3"]
+            cmd = ["python3", str(skill_search_script), "--query", query, "--type", "running-coach", "--top", "3"]
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if result.returncode == 0 and result.stdout.strip() and "Top" in result.stdout:
                 # Clean up output to be more prompt-friendly
@@ -567,12 +613,12 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
         recovery_text = f"Body Battery: {recovery.get('level', 'N/A')}%"
 
     # Fetch Race Goal
-    goal = race_goal.load_goal()
+    goal = athlete_profile.load_goal()
     goal_text = ""
     if goal and goal.get("race_date"):
-        days = race_goal.get_days_remaining(goal)
-        dist_str = race_goal.format_distance(goal["race_distance_km"])
-        goal_text = f"近期賽事目標: {goal.get('race_name', dist_str)} ({dist_str}), 日期: {goal['race_date']} (距今 {days} 天, 階段: {race_goal.get_training_phase(days)})"
+        days = athlete_profile.get_days_remaining(goal["race_date"])
+        dist_str = athlete_profile.format_distance(goal["race_distance_km"])
+        goal_text = f"近期賽事目標: {goal.get('race_name', dist_str)} ({dist_str}), 日期: {goal['race_date']} (距今 {days} 天, 階段: {athlete_profile.get_training_phase_name(days)})"
 
     prompt = (
         f"請作為跑步教練，分析以下這場剛完成的活動數據：\n\n"
