@@ -39,18 +39,18 @@ Execute `python scripts/update_profile.py show` to read the athlete's persistent
     - `python scripts/update_profile.py note --text "User reported poor sleep this week."`
     - `python scripts/update_profile.py milestone --description "First 30km long run"`
 
-### 1b. Recovery Assessment (HRV / Body Battery)
-Use the `get_hrv_and_recovery()` helper (importable from `scripts/garmin.py`) to judge today's readiness:
+### 1b. Recovery Assessment (Dynamic Guardrail 🛡️)
+Always check the user's recovery state before giving advice. This is our **Dynamic Guardrail** logic — a proactive way to prevent overtraining and show personalized care.
 
-| Recovery Signal | Interpretation | Recommendation |
+| Recovery Signal | Interpretation | Dynamic Guardrail Action |
 |---|---|---|
-| HRV status = `balanced` | Well-recovered | High-intensity or long run OK |
-| HRV status = `low` / `unbalanced` | Under-recovered | Replace hard session with Easy Run or rest |
-| Body Battery ≥ 70 | Good | High-intensity OK |
-| Body Battery 40–69 | Moderate | Easy or Tempo only |
-| Body Battery < 40 | Poor | Rest or very light 20-min jog |
+| HRV status = `balanced` | Well-recovered | ✅ "你的恢復非常完美！今天可以按照原計畫全力以赴。" |
+| HRV status = `low` / `unbalanced` | Under-recovered | ⚠️ "注意到你的 HRV 偏低，為了長期健康，建議將今天的課表改為 E 跑或完全休息。" |
+| Body Battery ≥ 70 | Good | ✅ "能量充沛，正是執行主課表的好時機。" |
+| Body Battery 40–69 | Moderate | ⚠️ "恢復尚可但非巔峰，建議體感為主，不要強求配速。" |
+| Body Battery < 40 | Poor | ❌ "電力不足！今天建議優先休息，強行訓練反而會累積傷病風險。" |
 
-Always mention the recovery signal when presenting the plan, and adjust intensity accordingly.
+**Tone Directive**: When implementing the Dynamic Guardrail, be warm and proactive. Don't just list data; say things like "我看到你昨晚恢復得不太理想..." or "太棒了，看到你今天 HRV 回到平衡狀態..." to make the user feel you are constantly watching over their health.
 
 ### 2. Plan Generation
 Generate a workout plan for the next week.

@@ -406,7 +406,9 @@ def get_weekly_summary(api: Garmin) -> dict:
     summary_by_type = {}
     
     for activity in (activities or []):
-        act_type = activity.get("activityType", {}).get("typeKey", "")
+        # Fix: ensure activityType is a dict before calling .get()
+        activity_type_obj = activity.get("activityType") or {}
+        act_type = activity_type_obj.get("typeKey", "")
         
         if "running" in act_type:
             key = "跑步"
@@ -446,6 +448,152 @@ def get_weekly_summary(api: Garmin) -> dict:
         "start_date": start_date.isoformat(),
         "end_date": today.isoformat(),
     }
+
+
+def get_daily_activities_list(api: Garmin, days: int = 7) -> list:
+    """Get a list of daily running distances for the past N days.
+
+    Args:
+        api: Authenticated Garmin API object.
+        days: Number of days to look back.
+
+    Returns:
+        List of dicts: [{'date': 'YYYY-MM-DD', 'distance_km': 5.2, 'duration_min': 30}, ...]
+    """
+    today = date.today()
+    start_date = today - datetime.timedelta(days=days-1)
+    success, activities, error = safe_api_call(
+        api.get_activities_by_date,
+        start_date.isoformat(),
+        today.isoformat(),
+    )
+    
+    if not success:
+        return [{"error": error}]
+
+    # Pre-populate with 0.0 for all days
+    daily_data = {}
+    for i in range(days):
+        d = (start_date + datetime.timedelta(days=i)).isoformat()
+        daily_data[d] = {"distance_km": 0.0, "duration_min": 0.0, "runs": []}
+
+    for activity in (activities or []):
+        # Fix: ensure activityType is a dict before calling .get()
+        activity_type_obj = activity.get("activityType") or {}
+        act_type = activity_type_obj.get("typeKey", "")
+        if "running" in act_type:
+            d_str = activity.get("startTimeLocal", "")[:10]
+            if d_str in daily_data:
+                dist = activity.get("distance", 0) / 1000.0
+                dur = activity.get("duration", 0) / 60.0
+                te = activity.get("trainingEffectLabel", "UNKNOWN")
+                
+                daily_data[d_str]["distance_km"] += dist
+                daily_data[d_str]["duration_min"] += dur
+                daily_data[d_str]["runs"].append({
+                    "distance": round(dist, 2),
+                    "te": te
+                })
+
+    result = []
+    for d_str in sorted(daily_data.keys()):
+        result.append({
+            "date": d_str,
+            "distance_km": round(daily_data[d_str]["distance_km"], 2),
+            "duration_min": round(daily_data[d_str]["duration_min"], 1),
+            "runs": daily_data[d_str]["runs"]
+        })
+    return result
+
+
+def get_comprehensive_daily_stats(api: Garmin, days: int = 7) -> list:
+    """Fetch multiple metrics (mileage, load, hrv, bb) for the past N days.
+
+    Args:
+        api: Authenticated Garmin API object.
+        days: Number of days to look back.
+
+    Returns:
+        List of dicts with daily metrics.
+    """
+    today = date.today()
+    start_date = today - datetime.timedelta(days=days-1)
+    
+    # 1. Fetch running activities for distance
+    activities_list = get_daily_activities_list(api, days)
+    if activities_list and isinstance(activities_list[0], dict) and "error" in activities_list[0]:
+        return activities_list
+
+    # Map for easy lookup
+    data_map = {d["date"]: d for d in activities_list}
+    for d in data_map.values():
+        d.update({"hrv": 0, "body_battery": 0, "training_load": 0, "load_ratio": 0})
+
+    # 2. Fetch other metrics day by day (Careful with API rate limits)
+    # Note: training_status and stats usually contain the data we need.
+    for i in range(days):
+        target_date = (start_date + datetime.timedelta(days=i)).isoformat()
+        
+        # HRV
+        _, hrv_data, _ = safe_api_call(api.get_hrv_data, target_date)
+        if hrv_data:
+            # Fix: ensure hrvSummary is a dict before calling .get()
+            summary = hrv_data.get("hrvSummary") or {}
+            data_map[target_date]["hrv"] = summary.get("lastNightAvg") or summary.get("lastNight") or 0
+        
+        # Training Load & Body Battery from stats
+        _, stats, _ = safe_api_call(api.get_stats, target_date)
+        if stats:
+            # We use max BB as the daily recovery indicator
+            data_map[target_date]["body_battery"] = stats.get("bodyBatteryHighestValue") or 0
+            
+        # Training Load (Acute) - training_status usually has the most recent one.
+        # To get historical, we might need a different endpoint, but let's try get_training_status.
+        _, status, _ = safe_api_call(api.get_training_status, target_date)
+        if status:
+            # Garmin API can be inconsistent with where these fields are located
+            # Try top-level first
+            acute_load = status.get("dailyTrainingLoadAcute") or status.get("acuteTrainingLoad")
+            chronic_load = status.get("dailyTrainingLoadChronic") or status.get("chronicTrainingLoad")
+            load_ratio = status.get("acuteChronicLoadRatio") or status.get("loadRatio")
+            
+            # Try mostRecentTrainingStatus if not found
+            if not acute_load or not load_ratio or not chronic_load:
+                # Fix: ensure mr_status is a dict
+                mr_status = status.get("mostRecentTrainingStatus") or {}
+                acute_load = acute_load or mr_status.get("dailyTrainingLoadAcute") or mr_status.get("acuteTrainingLoad")
+                chronic_load = chronic_load or mr_status.get("dailyTrainingLoadChronic") or mr_status.get("chronicTrainingLoad")
+                load_ratio = load_ratio or mr_status.get("acuteChronicLoadRatio") or mr_status.get("loadRatio")
+                
+            # If still not found, try nested DTOs (common in older API versions)
+            if not acute_load or not load_ratio or not chronic_load:
+                mr_status = status.get("mostRecentTrainingStatus") or {}
+                latest_data_map = mr_status.get("latestTrainingStatusData") or {}
+                for device_data in latest_data_map.values():
+                    if device_data and device_data.get("primaryTrainingDevice"):
+                        # Fix: ensure load_dto is a dict
+                        load_dto = device_data.get("acuteTrainingLoadDTO") or {}
+                        acute_load = acute_load or load_dto.get("dailyTrainingLoadAcute")
+                        chronic_load = chronic_load or load_dto.get("dailyTrainingLoadChronic")
+                        load_ratio = load_ratio or load_dto.get("acuteChronicLoadRatio")
+                        break
+
+            # Fallback calculation if the device API doesn't provide the ratio directly
+            if not load_ratio and acute_load and chronic_load:
+                try:
+                    acute_val = float(acute_load)
+                    chronic_val = float(chronic_load)
+                    if chronic_val > 0:
+                        load_ratio = acute_val / chronic_val
+                except (ValueError, TypeError):
+                    pass
+
+            if acute_load:
+                data_map[target_date]["training_load"] = acute_load
+            if load_ratio:
+                data_map[target_date]["load_ratio"] = load_ratio
+
+    return [data_map[d] for d in sorted(data_map.keys())]
 
 
 def get_upcoming_schedule(api: Garmin) -> list:

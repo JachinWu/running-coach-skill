@@ -85,6 +85,35 @@ def speed_to_pace(speed_ms: float) -> str:
     return f"{minutes}:{seconds:02d}"
 
 # ---------------------------------------------------------------------------
+# Activity Feedback (RPE) Helpers
+# ---------------------------------------------------------------------------
+
+def get_rpe_keyboard_data(activity_id: str) -> List[List[Dict[str, str]]]:
+    """Generate the structure for an RPE selection inline keyboard.
+    
+    Returns a list of rows, each containing dicts with 'text' and 'callback_data'.
+    """
+    return [
+        [
+            {"text": "1 (極輕鬆)", "callback_data": f"rpe:{activity_id}:1"},
+            {"text": "2", "callback_data": f"rpe:{activity_id}:2"},
+            {"text": "3", "callback_data": f"rpe:{activity_id}:3"},
+        ],
+        [
+            {"text": "4 (舒服)", "callback_data": f"rpe:{activity_id}:4"},
+            {"text": "5", "callback_data": f"rpe:{activity_id}:5"},
+            {"text": "6", "callback_data": f"rpe:{activity_id}:6"},
+        ],
+        [
+            {"text": "7 (吃力)", "callback_data": f"rpe:{activity_id}:7"},
+            {"text": "8", "callback_data": f"rpe:{activity_id}:8"},
+            {"text": "9", "callback_data": f"rpe:{activity_id}:9"},
+            {"text": "10 (力竭)", "callback_data": f"rpe:{activity_id}:10"},
+        ],
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Command Logic Handlers
 # ---------------------------------------------------------------------------
 
@@ -209,17 +238,23 @@ async def get_status_summary(api) -> str:
     return week_text + schedule_text + recovery_text
 
 async def get_weekly_report_data(api) -> dict:
-    """Logic for /report command.
+    """Logic for /report command (Integrated with /status info).
     
     Returns:
         Dict with 'caption' and 'photo_path' (temp file), or 'error'.
     """
     loop = asyncio.get_event_loop()
-    # Fetch comprehensive data for past 7 days
+    # Fetch comprehensive data for past 7 days for the chart
     daily_list = await loop.run_in_executor(None, garmin.get_comprehensive_daily_stats, api, 7)
     
     if daily_list and isinstance(daily_list[0], dict) and "error" in daily_list[0]:
         return {"error": daily_list[0]["error"]}
+
+    # Fetch sport-specific summaries (次数, 里程, 时间, 心率)
+    weekly_summary = await loop.run_in_executor(None, garmin.get_weekly_summary, api)
+    
+    # Fetch upcoming schedule
+    upcoming = await loop.run_in_executor(None, garmin.get_upcoming_schedule, api)
 
     chart_url = visualizer.get_weekly_chart_url(daily_list)
     
@@ -245,30 +280,54 @@ async def get_weekly_report_data(api) -> dict:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return {"error": f"下載圖表發生錯誤: {e}"}
 
-    # Find latest valid metrics (non-zero load/hrv/bb)
+    # Find latest valid metrics (non-zero load/hrv/bb) for the top summary
     latest_metrics = daily_list[-1]
     for d in reversed(daily_list):
         if d.get('training_load', 0) > 0 or d.get('hrv', 0) > 0 or d.get('body_battery', 0) > 0:
             latest_metrics = d
             break
 
-    # Summary text
-    total_dist = round(sum(d.get('distance_km', 0) for d in daily_list), 2)
+    # 1. Format sport-specific summaries
+    sport_texts = []
+    if "summary" in weekly_summary:
+        for sport, data in weekly_summary["summary"].items():
+            hr_line = f"{data['avg_hr']} bpm" if data["avg_hr"] > 0 else "N/A"
+            sport_texts.append(
+                f"🏃 <b>{sport}</b>: {data['runs_count']}次 | {data['total_distance_km']}km | {data['total_duration_min']}分 | {hr_line}"
+            )
+    sport_summary_text = "\n".join(sport_texts) if sport_texts else "• 過去 7 天無運動紀錄"
+
+    # 2. Format recovery and load metrics
     latest_load = latest_metrics.get('training_load', 0)
     latest_ratio = round(latest_metrics.get('load_ratio', 0) * 100)
     latest_hrv = latest_metrics.get('hrv', 0)
     latest_bb = latest_metrics.get('body_battery', 0)
-    latest_date = latest_metrics.get('date', 'N/A')
     
+    # 3. Format upcoming schedule
+    schedule_texts = []
+    for item in upcoming:
+        d_obj = datetime.date.fromisoformat(item["date"])
+        d_str = d_obj.strftime("%m/%d")
+        weekday_cn = ["一", "二", "三", "四", "五", "六", "日"][d_obj.weekday()]
+
+        w = item["workout"]
+        if w:
+            name = escape_html(
+                w.get("title") or w.get("workoutName") or "未命名課表"
+            )
+            schedule_texts.append(f"• {d_str} ({weekday_cn}): {name}")
+        else:
+            schedule_texts.append(f"• {d_str} ({weekday_cn}): 休息 ☕")
+    schedule_text = "\n".join(schedule_texts)
+
     caption = (
-        f"📊 <b>綜合訓練週報</b>\n"
-        f"📅 截至：{latest_date}\n\n"
-        f"🏃 總里程：<b>{total_dist} km</b>\n"
-        f"📈 最新負荷：{latest_load} (負荷比: {latest_ratio}%)\n"
+        f"📊 <b>綜合訓練週報</b>\n\n"
+        f"{sport_summary_text}\n\n"
         f"❤️ 昨夜 HRV：{latest_hrv} ms\n"
         f"🔋 Body Battery：{latest_bb}%\n"
-        f"📅 統計區間：{daily_list[0]['date']} ~ {daily_list[-1]['date']}\n\n"
-        f"圖表已整合里程(藍)、負荷比(紅)、HRV(青)與能量指數(黃)。"
+        f"📈 最新負荷：{latest_load} (負荷比: {latest_ratio}%)\n\n"
+        f"📅 <b>接下來課表</b>\n"
+        f"{schedule_text}"
     )
     
     return {
@@ -347,14 +406,14 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
 
 async def run_post_run_polling(
     get_api_func: Callable[[], Any],
-    send_message_func: Callable[[str], Coroutine[Any, Any, None]],
+    send_message_func: Callable[[str, Optional[Any]], Coroutine[Any, Any, None]],
     poll_interval: int = 900
 ):
     """Periodically check for new Garmin activities and trigger analysis.
     
     Args:
         get_api_func: Function that returns an authenticated Garmin API object.
-        send_message_func: Async function to send a message to the user.
+        send_message_func: Async function to send a message to the user (text, optional keyboard).
         poll_interval: Seconds between checks.
     """
     last_known_id = load_last_activity_id()
@@ -367,7 +426,11 @@ async def run_post_run_polling(
                 logger.warning("Garmin API not available, skipping check.")
             else:
                 # 1. Check HRV Guardrail (Proactive recovery alert)
-                await hrv_guardrail.run_hrv_guardrail_check(api, send_message_func)
+                # Pass a wrapper to match the expected single-arg signature of run_hrv_guardrail_check if needed,
+                # but hrv_guardrail might need update too if it calls send_message_func.
+                async def send_simple(text: str):
+                    await send_message_func(text, None)
+                await hrv_guardrail.run_hrv_guardrail_check(api, send_simple)
 
                 # 2. Check for new activities (Post-run analysis)
                 loop = asyncio.get_event_loop()
@@ -390,7 +453,6 @@ async def run_post_run_polling(
                             )
                             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180.0)
                             output = stdout.decode().strip()
-                            # (Optional: clean ANSI codes if the wrapper doesn't)
                             
                             if output:
                                 date_str = activity.get("startTimeLocal", "")[:10]
@@ -402,7 +464,12 @@ async def run_post_run_polling(
                                     f"🏃 *跑後自動分析* — {date_str}\n"
                                     f"📏 {dist_km} km ｜ ⏱ {dur_min} 分 ｜ ❤️ {avg_hr} bpm\n\n"
                                 )
-                                await send_message_func(header + output)
+                                await send_message_func(header + output, None)
+                                
+                                # Send RPE follow-up
+                                rpe_text = "*教練詢問*：這趟跑起來體感如何？請點選 RPE 強度（1 最輕鬆，10 全力）："
+                                rpe_keyboard = get_rpe_keyboard_data(activity_id)
+                                await send_message_func(rpe_text, rpe_keyboard)
                                 
                                 last_known_id = activity_id
                                 save_last_activity_id(activity_id)

@@ -28,6 +28,7 @@ DEFAULT_PROFILE: dict = {
     "progress_milestones": [],
     "coaching_notes": [],
     "long_term_insights": [],  # List of {"date": str, "category": str, "content": str}
+    "activity_feedback": [],   # List of {"activity_id": str, "date": str, "rpe": int, "pain_level": int, "pain_area": str, "notes": str}
     "last_updated": None,
 }
 
@@ -74,6 +75,71 @@ def save_profile(profile: dict) -> None:
     profile["last_updated"] = datetime.date.today().isoformat()
     with open(PROFILE_FILE, "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Activity Feedback (RPE / Pain) helpers
+# ---------------------------------------------------------------------------
+
+def add_activity_feedback(
+    activity_id: str, 
+    rpe: int, 
+    pain_level: int = 0, 
+    pain_area: str = "", 
+    notes: str = "",
+    date: Optional[str] = None
+) -> dict:
+    """Record subjective feedback for a specific activity.
+
+    Args:
+        activity_id: Garmin activity ID.
+        rpe:         Rate of Perceived Exertion (1-10).
+        pain_level:  Self-reported pain level (0-10).
+        pain_area:   Description of pain area (e.g. 'Right Achilles').
+        notes:       Optional qualitative notes.
+        date:        ISO date of the feedback (defaults to today).
+
+    Returns:
+        The newly added feedback entry.
+    """
+    profile = load_profile()
+    
+    if "activity_feedback" not in profile:
+        profile["activity_feedback"] = []
+        
+    entry = {
+        "activity_id": str(activity_id),
+        "date": date or datetime.date.today().isoformat(),
+        "rpe": rpe,
+        "pain_level": pain_level,
+        "pain_area": pain_area,
+        "notes": notes,
+    }
+    
+    # Update existing if same activity_id, otherwise append
+    existing_index = -1
+    for i, f in enumerate(profile["activity_feedback"]):
+        if f.get("activity_id") == str(activity_id):
+            existing_index = i
+            break
+            
+    if existing_index >= 0:
+        profile["activity_feedback"][existing_index] = entry
+    else:
+        profile["activity_feedback"].append(entry)
+        
+    # Sort and keep latest 50 activities
+    profile["activity_feedback"].sort(key=lambda x: x.get("date", ""), reverse=True)
+    profile["activity_feedback"] = profile["activity_feedback"][:50]
+    
+    save_profile(profile)
+    return entry
+
+
+def get_recent_feedback(limit: int = 5) -> list:
+    """Return the most recent activity feedback entries."""
+    profile = load_profile()
+    return profile.get("activity_feedback", [])[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +393,14 @@ def format_profile_summary(profile: Optional[dict] = None, include_insights: boo
     p = profile or load_profile()
     lines = ["## 🏅 運動員個人檔案\n"]
 
-    # ... (PBs, Physiology, Injuries, Milestones, Coaching notes sections remain the same) ...
+    # Recent activity feedback (RPE)
+    feedback = p.get("activity_feedback", [])
+    if feedback:
+        lines.append("### 📊 近期訓練體感 (RPE)")
+        for f in feedback[:3]: # Show latest 3
+            pain_str = f" | 痛感: {f['pain_level']} ({f['pain_area']})" if f.get("pain_level", 0) > 0 else ""
+            lines.append(f"• {f['date']}: RPE {f['rpe']}{pain_str}")
+        lines.append("")
 
     # PBs
     pb = p.get("personal_bests", {})

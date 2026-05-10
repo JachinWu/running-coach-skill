@@ -91,3 +91,18 @@ if __name__ == "__main__":
         except ValueError:
             pass
     get_recent_runs(days)
+    
+    # 新增：獲取當前恢復建議 (Dynamic Guardrail)
+    try:
+        from garmin import get_hrv_and_recovery
+        api = init_api()
+        recovery = get_hrv_and_recovery(api)
+        print("\n🛡️ [Dynamic Guardrail] 當前恢復狀態:")
+        if recovery["type"] == "hrv":
+            print(f"   狀態: {recovery.get('status')} | 昨夜 HRV: {recovery.get('last_night')} ms | 週平均: {recovery.get('weekly_avg')} ms")
+        elif recovery["type"] == "body_battery":
+            print(f"   Body Battery: {recovery.get('level')}%")
+        else:
+            print(f"   恢復數據不可用")
+    except Exception as e:
+        print(f"\n⚠️ 無法獲取恢復數據: {e}")
