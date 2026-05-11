@@ -168,9 +168,9 @@ async def get_status_summary(api) -> str:
 
     # Weekly block
     if "error" in weekly:
-        week_text = f"📊 <b>過去 7 天訓練摘要</b>\n❌ 查詢失敗：{escape_html(weekly['error'])}"
+        week_text = f"📊 **過去 7 天訓練摘要**\n❌ 查詢失敗：{weekly['error']}"
     else:
-        week_text = f"📊 <b>過去 7 天訓練摘要</b>"
+        week_text = f"📊 **過去 7 天訓練摘要**"
         summary_data = weekly.get("summary", {})
         if not summary_data:
             week_text += "\n• 過去 7 天無運動紀錄"
@@ -178,7 +178,7 @@ async def get_status_summary(api) -> str:
             for act_name, data in summary_data.items():
                 hr_line = f"{data['avg_hr']} bpm" if data["avg_hr"] > 0 else "N/A"
                 week_text += (
-                    f"\n🏃 <b>{act_name}</b>"
+                    f"\n🏃 **{act_name}**"
                     f"\n  • 次數：{data['runs_count']} 次"
                     f"\n  • 里程：{data['total_distance_km']} km"
                     f"\n  • 時間：{data['total_duration_min']} 分鐘"
@@ -186,9 +186,9 @@ async def get_status_summary(api) -> str:
                 )
 
     # Schedule block
-    schedule_text = "\n\n📅 <b>接下來課表</b>"
+    schedule_text = "\n\n📅 **接下來課表**"
     if upcoming and isinstance(upcoming[0], dict) and "error" in upcoming[0]:
-        schedule_text += f"\n❌ 查詢失敗：{escape_html(upcoming[0]['error'])}"
+        schedule_text += f"\n❌ 查詢失敗：{upcoming[0]['error']}"
     else:
         for item in upcoming:
             d_obj = datetime.date.fromisoformat(item["date"])
@@ -197,7 +197,7 @@ async def get_status_summary(api) -> str:
 
             w = item["workout"]
             if w:
-                name = escape_html(
+                name = (
                     w.get("title") or w.get("workoutName") or "未命名課表"
                 )
                 schedule_text += f"\n• {d_str} ({weekday_cn}): {name}"
@@ -225,7 +225,7 @@ async def get_status_summary(api) -> str:
         status_cn = status_cn_map.get(raw_status, raw_status.upper())
 
         recovery_text = (
-            f"\n\n❤️ <b>HRV 恢復狀態</b> {emoji}\n"
+            f"\n\n❤️ **HRV 恢復狀態** {emoji}\n"
             f"• 昨夜 HRV：{recovery.get('last_night', 'N/A')} ms\n"
             f"• 週平均 HRV：{recovery.get('weekly_avg', 'N/A')} ms\n"
             f"• 狀態：{status_cn}"
@@ -238,10 +238,10 @@ async def get_status_summary(api) -> str:
             bb_emoji, advice = "🔋⚠️", "中等恢復，建議輕鬆訓練"
         else:
             bb_emoji, advice = "🔋❌", "恢復不足，建議今日休息"
-        recovery_text = f"\n\n{bb_emoji} <b>Body Battery：{level}%</b>\n• {advice}"
+        recovery_text = f"\n\n{bb_emoji} **Body Battery：{level}%**\n• {advice}"
     else:
         recovery_text = (
-            f"\n\n⚠️ {escape_html(recovery.get('error', '恢復數據不可用'))}"
+            f"\n\n⚠️ {recovery.get('error', '恢復數據不可用')}"
         )
 
     return week_text + schedule_text + recovery_text
@@ -302,7 +302,7 @@ async def get_weekly_report_data(api) -> dict:
         for sport, data in weekly_summary["summary"].items():
             hr_line = f"{data['avg_hr']} bpm" if data["avg_hr"] > 0 else "N/A"
             sport_texts.append(
-                f"🏃 <b>{sport}</b>: {data['runs_count']}次 | {data['total_distance_km']}km | {data['total_duration_min']}分 | {hr_line}"
+                f"🏃 **{sport}**: {data['runs_count']}次 | {data['total_distance_km']}km | {data['total_duration_min']}分 | {hr_line}"
             )
     sport_summary_text = "\n".join(sport_texts) if sport_texts else "• 過去 7 天無運動紀錄"
 
@@ -321,7 +321,7 @@ async def get_weekly_report_data(api) -> dict:
 
         w = item["workout"]
         if w:
-            name = escape_html(
+            name = (
                 w.get("title") or w.get("workoutName") or "未命名課表"
             )
             schedule_texts.append(f"• {d_str} ({weekday_cn}): {name}")
@@ -330,12 +330,12 @@ async def get_weekly_report_data(api) -> dict:
     schedule_text = "\n".join(schedule_texts)
 
     caption = (
-        f"📊 <b>綜合訓練週報</b>\n\n"
+        f"📊 **綜合訓練週報**\n\n"
         f"{sport_summary_text}\n\n"
         f"❤️ 昨夜 HRV：{latest_hrv} ms\n"
         f"🔋 Body Battery：{latest_bb}%\n"
         f"📈 最新負荷：{latest_load} (負荷比: {latest_ratio}%)\n\n"
-        f"📅 <b>接下來課表</b>\n"
+        f"📅 **接下來課表**\n"
         f"{schedule_text}"
     )
     
@@ -399,8 +399,8 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
         if len(args) < 2:
             return (
                 "❌ 格式錯誤。\n\n"
-                "使用方式：<code>/goal set YYYY-MM-DD 距離 [賽事名稱]</code>\n"
-                "範例：<code>/goal set 2026-11-01 42 台北馬拉松</code>"
+                "使用方式：`/goal set YYYY-MM-DD 距離 [賽事名稱]`\n"
+                "範例：`/goal set 2026-11-01 42 台北馬拉松`"
             )
         try:
             race_date_str = args[0]
@@ -408,19 +408,19 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
             dist_km = athlete_profile.parse_distance(args[1])
             race_name = " ".join(args[2:]) if len(args) > 2 else ""
         except (ValueError, IndexError) as e:
-            return f"❌ 輸入格式有誤：{escape_html(str(e))}"
+            return f"❌ 輸入格式有誤：{str(e)}"
 
         goal = athlete_profile.save_goal(race_date_str, dist_km, race_name)
         days = athlete_profile.get_days_remaining(race_date_str)
         dist_str = athlete_profile.format_distance(dist_km)
         display_name = race_name or dist_str
         return (
-            f"🎯 <b>賽事目標已儲存！</b>\n\n"
-            f"• 賽事：{escape_html(display_name)}\n"
-            f"• 距離：{escape_html(dist_str)}\n"
-            f"• 日期：{escape_html(race_date_str)}\n"
-            f"• 距今：<b>{days} 天</b>\n"
-            f"• 訓練階段：{escape_html(athlete_profile.get_training_phase_name(days))}"
+            f"🎯 **賽事目標已儲存！**\n\n"
+            f"• 賽事：{display_name}\n"
+            f"• 距離：{dist_str}\n"
+            f"• 日期：{race_date_str}\n"
+            f"• 距今：**{days} 天**\n"
+            f"• 訓練階段：{athlete_profile.get_training_phase_name(days)}"
         )
     else:
         # show
@@ -428,8 +428,8 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
         if not goal or not goal.get("race_date"):
             return (
                 "📭 尚未設定賽事目標。\n\n"
-                "使用 <code>/goal set YYYY-MM-DD 距離</code> 設定\n"
-                "例：<code>/goal set 2026-11-01 42</code>"
+                "使用 `/goal set YYYY-MM-DD 距離` 設定\n"
+                "例：`/goal set 2026-11-01 42`"
             )
 
         days = athlete_profile.get_days_remaining(goal["race_date"])
@@ -439,17 +439,17 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
         if days < 0:
             countdown = f"⏰ 賽事已於 {abs(days)} 天前結束"
         elif days == 0:
-            countdown = "🏁 <b>今日就是比賽日！全力以赴！</b>"
+            countdown = "🏁 **今日就是比賽日！全力以赴！**"
         else:
-            countdown = f"⏰ 距離賽事還有 <b>{days} 天</b>"
+            countdown = f"⏰ 距離賽事還有 **{days} 天**"
 
         return (
-            f"🎯 <b>賽事目標</b>\n\n"
-            f"• 賽事：{escape_html(display_name)}\n"
-            f"• 距離：{escape_html(dist_str)}\n"
-            f"• 日期：{escape_html(goal['race_date'])}\n\n"
+            f"🎯 **賽事目標**\n\n"
+            f"• 賽事：{display_name}\n"
+            f"• 距離：{dist_str}\n"
+            f"• 日期：{goal['race_date']}\n\n"
             f"{countdown}\n"
-            f"• 訓練階段：{escape_html(athlete_profile.get_training_phase_name(days))}"
+            f"• 訓練階段：{athlete_profile.get_training_phase_name(days)}"
         )
 
 # ---------------------------------------------------------------------------
