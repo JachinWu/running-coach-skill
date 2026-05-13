@@ -122,9 +122,45 @@ def get_rpe_keyboard_data(activity_id: str) -> List[List[Dict[str, str]]]:
     ]
 
 
+def is_highlight_activity(activity: Dict[str, Any]) -> tuple[bool, str]:
+    """Check if the activity qualifies as a 'highlight' (Long Run, High TE, etc.)."""
+    # 1. Check Distance (> 15km)
+    dist_km = activity.get("distance", 0) / 1000.0
+    if dist_km >= 15:
+        return True, f"完成了 {dist_km:.1f} km 的長距離訓練"
+
+    # 2. Check Training Effect (TE >= 4.5)
+    ae_te = activity.get("aerobicTrainingEffect", 0)
+    an_te = activity.get("anaerobicTrainingEffect", 0)
+    
+    # Ensure they are numbers before comparing
+    try:
+        if (isinstance(ae_te, (int, float)) and ae_te >= 4.5) or \
+           (isinstance(an_te, (int, float)) and an_te >= 4.5):
+            return True, "完成了一場高品質、高強度的訓練"
+    except (TypeError, ValueError):
+        pass
+
+    return False, ""
+
+
 # ---------------------------------------------------------------------------
 # Command Logic Handlers
 # ---------------------------------------------------------------------------
+
+def get_tsb_analysis(atl: float, ctl: float) -> tuple[float, str, str]:
+    """Calculate TSB and return status and advice.
+    TSB = CTL - ATL (Chronic Training Load - Acute Training Load)
+    """
+    tsb = round(ctl - atl, 1)
+    if tsb > 5:
+        return tsb, "🟢 恢復良好 (Fresh)", "體力充沛，適合進行高品質或長距離訓練。"
+    elif tsb >= -10:
+        return tsb, "🟡 狀態平穩 (Neutral)", "體能維持中，可按計畫執行訓練。"
+    elif tsb >= -30:
+        return tsb, "🟢 訓練產出期 (Optimal)", "目前處於高效訓練區，雖有疲勞但體能進步最快。"
+    else:
+        return tsb, "🔴 疲勞過度 (Overreaching)", "疲勞累積過高，建議降低強度或增加休息，嚴防受傷。"
 
 async def get_today_summary(api) -> str:
     """Logic for /today command, providing context for the Dynamic Guardrail."""
@@ -132,21 +168,50 @@ async def get_today_summary(api) -> str:
     workout = await loop.run_in_executor(None, garmin.get_today_scheduled_workout, api)
     recovery = await loop.run_in_executor(None, garmin.get_hrv_and_recovery, api)
     
+    # Fetch TSB data (using comprehensive stats for latest day)
+    stats = await loop.run_in_executor(None, garmin.get_comprehensive_daily_stats, api, 1)
+    
     today_label = datetime.date.today().strftime("%Y/%m/%d")
     
-    # Format recovery info
+    # 1. Recovery info (HRV/BB)
     recovery_info = ""
     rtype = recovery.get("type", "unavailable")
     if rtype == "hrv":
         status_cn = {"balanced": "平衡", "low": "低", "unbalanced": "不平衡", "poor": "差"}.get(recovery.get("status", "").lower(), recovery.get("status"))
-        recovery_info = f"昨夜 HRV: {recovery.get('last_night', 'N/A')} ms (週平均: {recovery.get('weekly_avg', 'N/A')} ms, 狀態: {status_cn})"
+        recovery_info = f"昨夜 HRV: {recovery.get('last_night', 'N/A')} ms (狀態: {status_cn})"
     elif rtype == "body_battery":
         recovery_info = f"Body Battery: {recovery.get('level', 'N/A')}%"
     else:
         recovery_info = "恢復數據暫不可用"
 
+    # 2. TSB & Risk Analysis
+    tsb_info = ""
+    risk_warning = ""
+    if stats and isinstance(stats[0], dict) and "training_load" in stats[0] and "chronic_load" in stats[0]:
+        atl = stats[0]["training_load"]
+        ctl = stats[0]["chronic_load"]
+        tsb, tsb_status, tsb_advice = get_tsb_analysis(atl, ctl)
+        tsb_info = f"\n📈 TSB: {tsb} ({tsb_status})\n💡 建議: {tsb_advice}"
+        
+        # Risk assessment: Combine TSB with injury history
+        profile = athlete_profile.load_profile()
+        active_injuries = athlete_profile.get_active_injuries(profile)
+        recent_feedback = athlete_profile.get_recent_feedback(limit=3)
+        
+        max_pain = max([f.get("pain_level", 0) for f in recent_feedback] or [0])
+        
+        if tsb < -30 or (tsb < -20 and max_pain > 3) or active_injuries:
+            risk_warning = "\n\n⚠️ **【風險預警】**\n"
+            if tsb < -30:
+                risk_warning += "• 訓練壓力平衡 (TSB) 進入危險區，受傷風險大幅增加。\n"
+            if max_pain > 3:
+                risk_warning += f"• 近期有不適感 (疼痛等級: {max_pain})，請務必保守。\n"
+            if active_injuries:
+                risk_warning += f"• 尚有未痊癒傷病：{', '.join([i['description'] for i in active_injuries])}\n"
+            risk_warning += "👉 **建議：今日改為 E 跑、交叉訓練或徹底休息。**"
+
     if workout is None:
-        return f"📅 {today_label}\n今日為休息日。☕\n[恢復狀態]: {recovery_info}"
+        return f"📅 {today_label}\n今日為休息日。☕\n[恢復狀態]: {recovery_info}{tsb_info}{risk_warning}"
     elif isinstance(workout, dict) and "error" in workout:
         return f"❌ 查詢失敗：{workout['error']}"
     else:
@@ -155,8 +220,8 @@ async def get_today_summary(api) -> str:
         return (
             f"📅 今日課表 ({today_label})\n"
             f"🏃 課表內容: {name}\n"
-            f"📝 詳情: {description}\n"
-            f"❤️ [恢復狀態]: {recovery_info}"
+            f"📝 詳情: {description}\n\n"
+            f"❤️ [恢復狀態]: {recovery_info}{tsb_info}{risk_warning}"
         )
 
 async def get_status_summary(api) -> str:
@@ -308,9 +373,12 @@ async def get_weekly_report_data(api) -> dict:
 
     # 2. Format recovery and load metrics
     latest_load = latest_metrics.get('training_load', 0)
+    latest_ctl = latest_metrics.get('chronic_load', 0)
     latest_ratio = round(latest_metrics.get('load_ratio', 0) * 100)
     latest_hrv = latest_metrics.get('hrv', 0)
     latest_bb = latest_metrics.get('body_battery', 0)
+    
+    tsb = round(latest_ctl - latest_load, 1)
     
     # 3. Format upcoming schedule
     schedule_texts = []
@@ -334,7 +402,7 @@ async def get_weekly_report_data(api) -> dict:
         f"{sport_summary_text}\n\n"
         f"❤️ 昨夜 HRV：{latest_hrv} ms\n"
         f"🔋 Body Battery：{latest_bb}%\n"
-        f"📈 最新負荷：{latest_load} (負荷比: {latest_ratio}%)\n\n"
+        f"📈 訓練負荷：{latest_load} (TSB: {tsb} | 負荷比: {latest_ratio}%)\n\n"
         f"📅 **接下來課表**\n"
         f"{schedule_text}"
     )
@@ -458,14 +526,14 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
 
 async def run_post_run_polling(
     get_api_func: Callable[[], Any],
-    send_message_func: Callable[[str, Optional[Any], Optional[str]], Coroutine[Any, Any, Optional[int]]],
+    send_message_func: Callable[[str, Optional[Any], Optional[str], Optional[str]], Coroutine[Any, Any, Optional[int]]],
     poll_interval: int = 900
 ):
     """Periodically check for new Garmin activities and trigger analysis.
     
     Args:
         get_api_func: Function that returns an authenticated Garmin API object.
-        send_message_func: Async function to send a message (text, keyboard, session_id). 
+        send_message_func: Async function to send a message (text, keyboard, session_id, photo_path). 
                            Returns message_id if successful.
         poll_interval: Seconds between checks.
     """
@@ -480,7 +548,7 @@ async def run_post_run_polling(
             else:
                 # 1. Check HRV Guardrail (Proactive recovery alert)
                 async def send_simple(text: str):
-                    await send_message_func(text, None, None)
+                    await send_message_func(text, None, None, None)
                 await hrv_guardrail.run_hrv_guardrail_check(api, send_simple)
 
                 # 2. Check for new activities (Post-run analysis)
@@ -521,16 +589,33 @@ async def run_post_run_polling(
                                     f"🏃 *跑後自動分析* — {date_str}\n"
                                     f"📏 {dist_km} km ｜ ⏱ {dur_min} 分 ｜ ❤️ {avg_hr} bpm\n\n"
                                 )
+
+                                # --- Generate Activity Chart ---
+                                chart_path = None
+                                try:
+                                    # Save to a temporary location
+                                    temp_chart = os.path.join(tempfile.gettempdir(), f"chart_{activity_id}.png")
+                                    chart_path = await loop.run_in_executor(None, visualizer.generate_activity_chart, api, activity, temp_chart)
+                                except Exception as e:
+                                    logger.error(f"Failed to generate post-run chart: {e}")
+
+                                # Highlight detection for FB Post collaboration
+                                is_highlight, reason = is_highlight_activity(activity)
+                                highlight_keyboard = None
+                                if is_highlight:
+                                    highlight_keyboard = [[{"text": "✨ 生成 FB 貼文草稿", "callback_data": f"gen_fb_post:{activity_id}"}]]
+
                                 # Send analysis and associate session
-                                await send_message_func(header + output, None, session_id)
+                                await send_message_func(header + output, highlight_keyboard, session_id, chart_path)
                                 
                                 # Send RPE follow-up and associate with the SAME session
                                 rpe_text = "*教練詢問*：這趟跑起來體感如何？請點選 RPE 強度（1 最輕鬆，10 全力）："
                                 rpe_keyboard = get_rpe_keyboard_data(activity_id)
-                                await send_message_func(rpe_text, rpe_keyboard, session_id)
+                                await send_message_func(rpe_text, rpe_keyboard, session_id, None)
                                 
                                 last_known_id = activity_id
                                 save_last_activity_id(activity_id)
+                                logger.info(f"New activity processed: {activity_id}")
                         else:
                             logger.info(f"New activity {activity_id} is {act_type}, skipping.")
         except Exception as e:

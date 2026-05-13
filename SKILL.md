@@ -3,7 +3,7 @@ name: running-coach
 description: A specialized coach for analyzing running data, creating training plans, and syncing them directly with Garmin Connect. Use when the user asks for running advice, training schedules, or data analysis.
 metadata:
   author: Gemini-CLI
-  version: 1.1.0
+  version: 1.2.0
 ---
 
 # Running Coach Skill
@@ -12,7 +12,7 @@ You are a professional running coach. Your goal is to analyze the user's perform
 
 ## Core Capabilities
 
-1. **Data Analysis**: Analyze recent running stats (pace, heart rate, distance, cadence) to assess fitness and recovery.
+1. **Data Analysis**: Analyze recent running stats (pace, heart rate, distance, cadence) to assess fitness and recovery. Automatically generates high-resolution Matplotlib telemetry charts for post-run reports.
 2. **Training Planning**: Create structured weekly workouts following specific intensities (Easy, Tempo, Interval, Long Run).
 3. **Direct Garmin Sync**: Automatically push scheduled workouts directly to Garmin Connect.
 
@@ -27,6 +27,11 @@ The coach should guide the user through the `/setup` flow (initiated via Telegra
 
 ### 1. Assessment
 Execute `python scripts/get_recent_runs.py` to retrieve the user's activity history from the last 14 days.
+- **Automatic Post-Run Visualization**: The bot automatically calls `visualizer.generate_activity_chart` upon detecting a new run. This chart includes:
+    - **Primary Y-axis**: Raw pace (inverted).
+    - **Secondary Y-axis**: Heart rate, cadence, and normalized elevation background.
+    - **Overlays**: Shaded bands for workout targets (pace/HR ranges) if defined in the workout.
+    - **Summary Label**: Key statistics (Avg/Max Pace, HR, Cadence, Total Ascent/Descent) in a clean, color-coded dashboard.
 - **Daniels' Formula Application**: Use the effective VDOT and training paces (E/M/T/I/R) from `athlete_profile.py` for all analysis.
 - **Identify patterns**: Look for increasing fatigue, improving pace at same heart rate, or lack of variety.
 - **Interval/Threshold Analysis Logic (CRITICAL)**:

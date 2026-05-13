@@ -10,8 +10,10 @@ A specialized AI running coach for analyzing data, planning workouts, and syncin
 
 ### 📊 Data-Driven Analysis | 數據驅動分析
 - **Performance Review**: Automatically analyzes the last 14 days of running history (pace, heart rate, cadence, stride length).
+- **High-Resolution Activity Charts**: Generates professional, multi-axis telemetry charts (Pace, HR, Cadence, Elevation) for every run using Matplotlib.
 - **Form Analysis**: Identifies breakdown in form (cadence/stride) during high-intensity intervals.
 - **成效檢視**：自動分析過去 14 天的跑步歷史（配速、心率、步頻、步幅）。
+- **高解析度活動圖表**：為每次跑步自動生成專業的多軸遙測圖表（配速、心率、步頻、海拔），使用 Matplotlib 繪製。
 - **跑姿分析**：識別高強度間歇訓練中後段的跑姿崩潰（步頻/步幅變化）。
 
 ### 📅 Smart Training Plans | 智能訓練計畫
