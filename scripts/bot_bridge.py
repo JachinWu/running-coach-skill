@@ -21,11 +21,15 @@ try:
     from . import athlete_profile
     from . import visualizer
     from . import hrv_guardrail
+    from . import weather
+    from . import performance_vdot
 except ImportError:
     import garmin
     import athlete_profile
     import visualizer
     import hrv_guardrail
+    import weather
+    import performance_vdot
 
 import requests
 import tempfile
@@ -39,6 +43,26 @@ logger = logging.getLogger(__name__)
 SKILL_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = SKILL_DIR / "data"
 LAST_ACTIVITY_FILE = DATA_DIR / "last_activity.json"
+MORNING_STATE_FILE = DATA_DIR / "morning_state.json"
+
+def load_morning_state() -> dict:
+    """Load the last morning routine alert state."""
+    if MORNING_STATE_FILE.exists():
+        try:
+            with open(MORNING_STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load morning state: {e}")
+    return {}
+
+def save_morning_state(state: dict) -> None:
+    """Save the current morning routine alert state."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(MORNING_STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        logger.error(f"Failed to save morning state: {e}")
 
 def load_last_activity_id() -> Optional[str]:
     """Load the last processed activity ID from disk."""
@@ -122,6 +146,32 @@ def get_rpe_keyboard_data(activity_id: str) -> List[List[Dict[str, str]]]:
     ]
 
 
+def get_shoe_selection_keyboard(activity_id: str) -> List[List[Dict[str, str]]]:
+    """Generate inline keyboard for selecting which shoes were used for an activity."""
+    profile = athlete_profile.load_profile()
+    active_shoes = [s for s in profile.get("shoes", []) if s.get("status") == "active"]
+    
+    if not active_shoes:
+        return []
+        
+    keyboard = []
+    # 2 shoes per row
+    row = []
+    for shoe in active_shoes:
+        nickname = shoe["nickname"]
+        # callback format: shoe:activity_id:nickname
+        row.append({"text": nickname, "callback_data": f"shoe:{activity_id}:{nickname}"})
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    
+    # Add a "None/Other" option
+    keyboard.append([{"text": "其他 / 未記錄", "callback_data": f"shoe:{activity_id}:none"}])
+    return keyboard
+
+
 def is_highlight_activity(activity: Dict[str, Any]) -> tuple[bool, str]:
     """Check if the activity qualifies as a 'highlight' (Long Run, High TE, etc.)."""
     # 1. Check Distance (> 15km)
@@ -174,15 +224,21 @@ async def get_today_summary(api) -> str:
     today_label = datetime.date.today().strftime("%Y/%m/%d")
     
     # 1. Recovery info (HRV/BB)
-    recovery_info = ""
-    rtype = recovery.get("type", "unavailable")
-    if rtype == "hrv":
-        status_cn = {"balanced": "平衡", "low": "低", "unbalanced": "不平衡", "poor": "差"}.get(recovery.get("status", "").lower(), recovery.get("status"))
-        recovery_info = f"昨夜 HRV: {recovery.get('last_night', 'N/A')} ms (狀態: {status_cn})"
-    elif rtype == "body_battery":
-        recovery_info = f"Body Battery: {recovery.get('level', 'N/A')}%"
-    else:
-        recovery_info = "恢復數據暫不可用"
+    hrv_part = ""
+    if recovery.get("hrv"):
+        hrv = recovery["hrv"]
+        status_cn = {"balanced": "平衡", "low": "低", "unbalanced": "不平衡", "poor": "差"}.get(
+            hrv.get("status", "").lower(), hrv.get("status", "未知")
+        )
+        hrv_part = f"昨夜 HRV: {hrv.get('last_night', 'N/A')} ms ({status_cn})"
+    
+    bb_part = ""
+    if recovery.get("body_battery"):
+        bb = recovery["body_battery"]
+        bb_val = bb.get("highest") or bb.get("most_recent") or "N/A"
+        bb_part = f"Body Battery: {bb_val}%"
+    
+    recovery_info = " | ".join(filter(None, [hrv_part, bb_part])) or "恢復數據暫不可用"
 
     # 2. TSB & Risk Analysis
     tsb_info = ""
@@ -270,9 +326,10 @@ async def get_status_summary(api) -> str:
                 schedule_text += f"\n• {d_str} ({weekday_cn}): 休息 ☕"
 
     # Recovery block
-    rtype = recovery.get("type", "unavailable")
-    if rtype == "hrv":
-        raw_status = recovery.get("status", "unknown").lower()
+    hrv_part = ""
+    if recovery.get("hrv"):
+        hrv = recovery["hrv"]
+        raw_status = hrv.get("status", "unknown").lower()
         status_emoji_map = {
             "balanced": "✅",
             "low": "⚠️",
@@ -285,31 +342,91 @@ async def get_status_summary(api) -> str:
             "unbalanced": "不平衡",
             "poor": "差",
         }
-
         emoji = status_emoji_map.get(raw_status, "📊")
         status_cn = status_cn_map.get(raw_status, raw_status.upper())
-
-        recovery_text = (
+        hrv_part = (
             f"\n\n❤️ **HRV 恢復狀態** {emoji}\n"
-            f"• 昨夜 HRV：{recovery.get('last_night', 'N/A')} ms\n"
-            f"• 週平均 HRV：{recovery.get('weekly_avg', 'N/A')} ms\n"
+            f"• 昨夜 HRV：{hrv.get('last_night', 'N/A')} ms\n"
+            f"• 週平均 HRV：{hrv.get('weekly_avg', 'N/A')} ms\n"
             f"• 狀態：{status_cn}"
         )
-    elif rtype == "body_battery":
-        level: int = recovery.get("level") or 0
+
+    bb_part = ""
+    if recovery.get("body_battery"):
+        bb = recovery["body_battery"]
+        level = bb.get("highest") or bb.get("most_recent") or 0
         if level >= 70:
             bb_emoji, advice = "🔋✅", "狀態良好，可進行高強度訓練"
         elif level >= 40:
             bb_emoji, advice = "🔋⚠️", "中等恢復，建議輕鬆訓練"
         else:
             bb_emoji, advice = "🔋❌", "恢復不足，建議今日休息"
-        recovery_text = f"\n\n{bb_emoji} **Body Battery：{level}%**\n• {advice}"
-    else:
-        recovery_text = (
-            f"\n\n⚠️ {recovery.get('error', '恢復數據不可用')}"
-        )
+        bb_part = f"\n\n{bb_emoji} **Body Battery：{level}%**\n• {advice}"
+
+    recovery_text = hrv_part + bb_part
+    if not recovery_text:
+        recovery_text = f"\n\n⚠️ {recovery.get('error', '恢復數據不可用')}"
 
     return week_text + schedule_text + recovery_text
+
+async def get_recovery_data(api) -> dict:
+    """Fetch HRV and recovery data from Garmin."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, garmin.get_hrv_and_recovery, api)
+
+async def get_morning_routine_data(api) -> dict:
+    """Aggregate data for the morning proactive push message.
+    
+    Includes:
+    - Today's workout summary
+    - Recovery status (HRV/Body Battery)
+    - Weather & AQI forecast
+    """
+    loop = asyncio.get_event_loop()
+    
+    # 1. Fetch Today's Summary (Workout + Recovery)
+    summary = await get_today_summary(api)
+    
+    # 2. Fetch Weather & AQI
+    # We use wrap in run_in_executor because these are blocking requests
+    weather_data = await loop.run_in_executor(None, weather.get_weather_forecast)
+    aqi_data = await loop.run_in_executor(None, weather.get_aqi)
+    env_summary = weather.format_weather_summary(weather_data, aqi_data)
+    
+    # 3. Determine if recovery is risky (for buttons)
+    recovery = await loop.run_in_executor(None, garmin.get_hrv_and_recovery, api)
+    is_risky = False
+    if recovery.get("type") == "hrv":
+        is_risky = recovery.get("status", "").lower() in ("low", "unbalanced", "poor")
+    elif recovery.get("type") == "body_battery":
+        is_risky = (recovery.get("level") or 100) < 40
+
+    return {
+        "summary": summary,
+        "env_summary": env_summary,
+        "is_risky": is_risky,
+        "recovery": recovery
+    }
+
+async def delete_today_workout(api) -> bool:
+    """Delete today's scheduled workout from Garmin."""
+    loop = asyncio.get_event_loop()
+    today_str = datetime.date.today().isoformat()
+    return await loop.run_in_executor(None, garmin.delete_workout_on_date, api, today_str)
+
+async def get_workout_details_for_today(api) -> Optional[dict]:
+    """Fetch details of today's scheduled workout."""
+    loop = asyncio.get_event_loop()
+    workout = await loop.run_in_executor(None, garmin.get_today_scheduled_workout, api)
+    if workout and workout.get("workoutId"):
+        return await loop.run_in_executor(None, api.get_workout_by_id, workout["workoutId"])
+    return None
+
+async def upload_and_replace_workout(api, workout_json: dict) -> bool:
+    """Upload a workout and replace today's schedule."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, garmin.upload_and_replace_workout, api, workout_json)
+
 
 async def get_weekly_report_data(api) -> dict:
     """Logic for /report command (Integrated with /status info).
@@ -467,26 +584,35 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
         if len(args) < 2:
             return (
                 "❌ 格式錯誤。\n\n"
-                "使用方式：`/goal set YYYY-MM-DD 距離 [賽事名稱]`\n"
-                "範例：`/goal set 2026-11-01 42 台北馬拉松`"
+                "使用方式：`/goal set YYYY-MM-DD 距離 [賽事名稱] [目標時間]`\n"
+                "範例：`/goal set 2026-12-20 42 台北馬拉松 03:30:00`"
             )
         try:
             race_date_str = args[0]
             datetime.date.fromisoformat(race_date_str)  # validate format
             dist_km = athlete_profile.parse_distance(args[1])
-            race_name = " ".join(args[2:]) if len(args) > 2 else ""
+            
+            # Handle variable args for name and time
+            # Check if last arg is a time format
+            target_time = None
+            if len(args) >= 4 and ":" in args[-1]:
+                target_time = args[-1]
+                race_name = " ".join(args[2:-1])
+            else:
+                race_name = " ".join(args[2:]) if len(args) > 2 else ""
         except (ValueError, IndexError) as e:
             return f"❌ 輸入格式有誤：{str(e)}"
 
-        goal = athlete_profile.save_goal(race_date_str, dist_km, race_name)
+        goal = athlete_profile.save_goal(race_date_str, dist_km, race_name, target_time)
         days = athlete_profile.get_days_remaining(race_date_str)
         dist_str = athlete_profile.format_distance(dist_km)
         display_name = race_name or dist_str
+        time_msg = f"\n• 目標時間：{target_time}" if target_time else ""
         return (
             f"🎯 **賽事目標已儲存！**\n\n"
             f"• 賽事：{display_name}\n"
             f"• 距離：{dist_str}\n"
-            f"• 日期：{race_date_str}\n"
+            f"• 日期：{race_date_str}{time_msg}\n"
             f"• 距今：**{days} 天**\n"
             f"• 訓練階段：{athlete_profile.get_training_phase_name(days)}"
         )
@@ -511,7 +637,7 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
         else:
             countdown = f"⏰ 距離賽事還有 **{days} 天**"
 
-        return (
+        summary = (
             f"🎯 **賽事目標**\n\n"
             f"• 賽事：{display_name}\n"
             f"• 距離：{dist_str}\n"
@@ -519,6 +645,81 @@ async def get_goal_summary(subcommand: str, args: List[str]) -> str:
             f"{countdown}\n"
             f"• 訓練階段：{athlete_profile.get_training_phase_name(days)}"
         )
+
+        # --- Add Goal Projection ---
+        profile = athlete_profile.load_profile()
+        projection = performance_vdot.calculate_goal_projection(profile)
+        if projection and projection.get("status") != "expired":
+            summary += "\n\n📈 **目標達成預測**\n"
+            if projection.get("status") == "no_target_time":
+                summary += "• 目前尚未設定「目標時間」，預估無法進行精準達標預測。請使用 `/setup` 或 `/goal set` 補充。"
+            else:
+                summary += (
+                    f"• 目標跑力 (Target VDOT): {projection['target_vdot']}\n"
+                    f"• 目前跑力 (Current VDOT): {projection['current_vdot']}\n"
+                    f"• VDOT 差距: {projection['vdot_gap']}\n"
+                    f"• 達成難度: {projection['difficulty']}\n"
+                    f"• 建議：{projection['suggestion']}"
+                )
+        
+        return summary
+
+
+async def handle_achievements(api) -> tuple[str, Optional[str]]:
+    """Handle /achievements command.
+    
+    Returns:
+        tuple (text_response, photo_path)
+    """
+    loop = asyncio.get_event_loop()
+    
+    # 1. Fetch multi-year history and generate QoQ chart
+    try:
+        history = await loop.run_in_executor(None, garmin.get_multi_year_activity_history, api)
+        photo_path = "tmp/achievements_qoq.png"
+        chart_success = await loop.run_in_executor(None, visualizer.generate_qoq_chart, history, photo_path)
+        if not chart_success:
+            photo_path = None
+    except Exception as e:
+        logger.error(f"Failed to generate achievement chart: {e}")
+        photo_path = None
+
+    # 2. Textual summary: Shoe Lifespan
+    profile = athlete_profile.load_profile()
+    shoes = profile.get("shoes", [])
+    active_shoes = [s for s in shoes if s.get("status") == "active"]
+    
+    shoe_text = ""
+    if active_shoes:
+        shoe_text = "\n\n👟 **跑鞋壽命管理**\n"
+        for s in active_shoes:
+            curr = s.get("current_km", 0)
+            target = s.get("target_km", 500)
+            pct = (curr / target) * 100 if target > 0 else 0
+            
+            # Health indicator
+            indicator = "🟢"
+            if pct > 95: indicator = "🔴 建議更換"
+            elif pct > 80: indicator = "🟡 接近壽命"
+            
+            shoe_text += f"• {s['nickname']}: {curr:.1f} / {target} km ({pct:.1f}%) {indicator}\n"
+
+    # 3. Overall stats summary (Total Mileage)
+    total_km = 0
+    for y_data in history.values():
+        for q_data in y_data.values():
+            total_km += sum(q_data.values())
+
+    response = (
+        "🏆 **個人成就看板**\n\n"
+        f"📊 **長期數據：跨年度季度對比 (QoQ)**\n"
+        f"• 歷史總跑量：{total_km:,.1f} km\n"
+        f"• 數據包含年度：{', '.join(map(str, sorted(history.keys())))}"
+        f"{shoe_text}"
+    )
+    
+    return response, photo_path
+
 
 # ---------------------------------------------------------------------------
 # Background Polling Logic
@@ -565,8 +766,9 @@ async def run_post_run_polling(
                             profile["last_activity_date"] = activity.get("startTimeLocal", "")[:10]
                             athlete_profile.save_profile(profile)
 
+                            workout_detail = await match_activity_with_workout(api, activity)
                             session_id = uuid.uuid4().hex
-                            prompt = await compose_analysis_prompt(api, activity)
+                            prompt = await compose_analysis_prompt(api, activity, workout_detail)
                             
                             # Execute Gemini CLI with session_id
                             cmd = ["gemini", "--skip-trust", "--approval-mode", "yolo", "--session-id", session_id, "-p", prompt]
@@ -590,12 +792,13 @@ async def run_post_run_polling(
                                     f"📏 {dist_km} km ｜ ⏱ {dur_min} 分 ｜ ❤️ {avg_hr} bpm\n\n"
                                 )
 
-                                # --- Generate Activity Chart ---
+                                # --- Match Workout and Generate Activity Chart ---
                                 chart_path = None
                                 try:
+                                    workout_detail = await match_activity_with_workout(api, activity)
                                     # Save to a temporary location
                                     temp_chart = os.path.join(tempfile.gettempdir(), f"chart_{activity_id}.png")
-                                    chart_path = await loop.run_in_executor(None, visualizer.generate_activity_chart, api, activity, temp_chart)
+                                    chart_path = await loop.run_in_executor(None, visualizer.generate_activity_chart, api, activity, temp_chart, workout_detail)
                                 except Exception as e:
                                     logger.error(f"Failed to generate post-run chart: {e}")
 
@@ -612,10 +815,43 @@ async def run_post_run_polling(
                                 rpe_text = "*教練詢問*：這趟跑起來體感如何？請點選 RPE 強度（1 最輕鬆，10 全力）："
                                 rpe_keyboard = get_rpe_keyboard_data(activity_id)
                                 await send_message_func(rpe_text, rpe_keyboard, session_id, None)
+
+                                # --- New: Shoe Selection ---
+                                shoe_keyboard = get_shoe_selection_keyboard(activity_id)
+                                if shoe_keyboard:
+                                    shoe_text = "*教練詢問*：這趟訓練是穿哪雙跑鞋呢？點選即可自動累計里程："
+                                    await send_message_func(shoe_text, shoe_keyboard, session_id, None)
                                 
-                                last_known_id = activity_id
-                                save_last_activity_id(activity_id)
-                                logger.info(f"New activity processed: {activity_id}")
+                            last_known_id = activity_id
+                            save_last_activity_id(activity_id)
+                            logger.info(f"New activity processed: {activity_id}")
+
+                            # --- Performance-Driven VDOT Logic ---
+                            try:
+                                session_vdot = performance_vdot.calculate_session_vdot(activity, profile)
+                                if session_vdot:
+                                    performance_vdot.update_vdot_tracking(session_vdot)
+                                    logger.info(f"Session VDOT recorded: {session_vdot['vdot_est']} (conf: {session_vdot['confidence']})")
+                                    
+                                    # Check for trend
+                                    vdot_trend = performance_vdot.analyze_vdot_trend()
+                                    if vdot_trend:
+                                        v_msg = (
+                                            f"📈 *教練觀察：跑力進化偵測*\n\n"
+                                            f"數據顯示您最近的訓練表現已超越目前的設定：\n"
+                                            f"• 目前 VDOT: {vdot_trend['current_vdot']}\n"
+                                            f"• 數據偵測值: *{vdot_trend['avg_vdot']}*\n\n"
+                                            f"💡 {vdot_trend['reason']}\n"
+                                            f"為了確保配速精準，**請問您最近的體感如何？**"
+                                        )
+                                        v_keyboard = [
+                                            [{"text": "🔵 體感穩定，按數據調升", "callback_data": f"vdot_upgrade:full:{vdot_trend['avg_vdot']}"}],
+                                            [{"text": "🟡 那是全力拚搏 (調升減半)", "callback_data": f"vdot_upgrade:half:{vdot_trend['avg_vdot']}"}],
+                                            [{"text": "🔴 數據異常/心率飄移", "callback_data": "vdot_upgrade:skip"}]
+                                        ]
+                                        await send_message_func(v_msg, v_keyboard, session_id, None)
+                            except Exception as ve:
+                                logger.error(f"Performance VDOT calculation failed: {ve}")
                         else:
                             logger.info(f"New activity {activity_id} is {act_type}, skipping.")
         except Exception as e:
@@ -663,8 +899,38 @@ async def search_personalized_memory(query: str) -> str:
             
     return ""
 
-async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
+async def match_activity_with_workout(api, activity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Match an activity with today's scheduled workout based on name."""
+    loop = asyncio.get_event_loop()
+    workout_item = await loop.run_in_executor(None, garmin.get_today_scheduled_workout, api)
+    
+    if not workout_item or (isinstance(workout_item, dict) and "error" in workout_item):
+        return None
+        
+    act_name = activity.get("activityName", "")
+    workout_name = workout_item.get("title") or workout_item.get("workoutName") or ""
+    
+    # Strip emojis and common prefixes/suffixes for matching
+    def clean_name(name):
+        # Strip emojis
+        name = re.sub(r'[^\x00-\x7F\u4e00-\u9fa5\u3000-\u303f\uff00-\uffef]', '', name)
+        return name.strip().lower()
+        
+    c_act = clean_name(act_name)
+    c_work = clean_name(workout_name)
+    
+    if c_work and c_work in c_act:
+        workout_id = workout_item.get("workoutId")
+        if workout_id:
+            return await loop.run_in_executor(None, garmin.get_workout_details, api, workout_id)
+            
+    return None
+
+
+async def compose_analysis_prompt(api, activity: Dict[str, Any], workout_detail: Optional[Dict[str, Any]] = None) -> str:
     """Compose a detailed prompt for Gemini analysis based on activity data."""
+    loop = asyncio.get_event_loop()
+    
     activity_id = str(activity.get("activityId", ""))
     dist_km = round(activity.get("distance", 0) / 1000, 2)
     dur_min = round(activity.get("duration", 0) / 60, 1)
@@ -687,8 +953,50 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
     avg_pace_str = speed_to_pace(avg_speed)
     max_pace_str = speed_to_pace(max_speed)
 
+    # Workout Target info
+    workout_target_text = ""
+    if workout_detail:
+        flat_steps = garmin.flatten_workout_steps(workout_detail)
+        workout_target_text = "\n[預定課表目標]:\n"
+        for i, step in enumerate(flat_steps):
+            t_type = step.get("targetType", {}).get("workoutTargetTypeKey")
+            v1 = step.get("targetValueOne")
+            v2 = step.get("targetValueTwo")
+            note = step.get("description", "") or step.get("note", "")
+            
+            target_desc = "無目標"
+            if t_type == "pace.zone":
+                p1, p2 = speed_to_pace(v1), speed_to_pace(v2)
+                # Ensure correct order for range
+                target_desc = f"配速 {p1} ~ {p2}"
+            elif t_type == "heart.rate.zone":
+                target_desc = f"心率 {int(min(v1, v2))} ~ {int(max(v1, v2))} bpm"
+            
+            workout_target_text += f"  - 步驟 {i+1}: {target_desc} ({note})\n"
+
+    # Fetch Weather Data based on Coordinates
+    weather_text = ""
+    heat_factor = 1.0
+    lat = activity.get("startLatitude")
+    lon = activity.get("startLongitude")
+    if lat is not None and lon is not None:
+        try:
+            obs = await loop.run_in_executor(None, weather.get_weather_by_coords, lat, lon)
+            if obs:
+                weather_text = (
+                    f"環境狀況 (觀測站: {obs['station_name']}):\n"
+                    f"• 氣溫: {obs['temp']}°C, 濕度: {obs['humidity']}%\n"
+                    f"• 風速: {obs['wind_speed']} m/s, 距離起點: {obs['distance_km']} km\n"
+                )
+                try:
+                    t = float(obs['temp'])
+                    h = float(obs.get('humidity', 50.0))
+                    heat_factor = performance_vdot.get_heat_adjustment_factor(t, h)
+                except: pass
+        except Exception as we:
+            logger.warning(f"Failed to fetch weather for coordinates {lat}, {lon}: {we}")
+
     # Fetch Recovery Data for Dynamic Guardrail
-    loop = asyncio.get_event_loop()
     recovery = await loop.run_in_executor(None, garmin.get_hrv_and_recovery, api)
     recovery_text = ""
     rtype = recovery.get("type", "unavailable")
@@ -715,9 +1023,18 @@ async def compose_analysis_prompt(api, activity: Dict[str, Any]) -> str:
         f"訓練效果: {te_label} (Aerobic: {ae_te}, Anaerobic: {an_te})\n"
         f"平均步頻: {cadence} spm\n"
         f"平均步幅: {stride} m\n"
+        f"{workout_target_text}\n"
+        f"{weather_text}\n"
         f"{recovery_text}\n"
         f"{goal_text}\n"
+        f"跑力修正係數 (Heat Factor): {heat_factor:.3f} (1.0 代表理想氣候，越高代表環境壓力越大)\n\n"
+        "分析指令：\n"
+        "1. **科學化評價**：根據配速、心率與環境壓力 (Heat Factor) 給予評價。如果 Heat Factor > 1.02，請務必強調「考慮到熱壓力，您的表現優於帳面數據」。\n"
+        "2. **體感對標**：推測跑者的體感 (RPE)，並給予針對性的恢復或調整建議。\n"
+        "3. **互動引導**：在結尾用語音或溫暖的語氣，引導跑者分享當下的心情或任何異常的體感（如：腿感、疲勞度）。\n"
+        "請保持專業、鼓勵且具有『共同學習』的特質，字數約 150-200 字。"
     )
+
 
     # Try to fetch laps for context
     try:

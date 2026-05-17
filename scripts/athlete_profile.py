@@ -42,6 +42,7 @@ DEFAULT_PROFILE: dict = {
     "last_activity_date": None, # ISO date string of last Garmin activity
     "target_race_distance_km": 42.195,
     "target_race_name": "",
+    "target_race_time": None,  # Target finish time as HH:MM:SS
     "physiology_history": [],  # List of {"date": str, "vo2max": float/None, "lthr": int/None, "lt_pace": str/None}
     "injuries": [],
     "health_notes": [],
@@ -49,6 +50,7 @@ DEFAULT_PROFILE: dict = {
     "coaching_notes": [],
     "long_term_insights": [],  # List of {"date": str, "category": str, "content": str}
     "activity_feedback": [],   # List of {"activity_id": str, "date": str, "rpe": int, "pain_level": int, "pain_area": str, "notes": str}
+    "shoes": [],               # List of {"nickname": str, "model": str, "current_km": float, "target_km": float, "status": str, "added_date": str}
     "last_updated": None,
 }
 
@@ -81,6 +83,10 @@ def load_profile() -> dict:
             if key != "personal_bests":
                 merged[key] = value
         
+        # Ensure 'shoes' key exists for older profiles
+        if "shoes" not in merged:
+            merged["shoes"] = []
+
         # Migration: If VDOT is missing but PBs exist, trigger a refresh
         if merged.get("vdot") is None:
             if _refresh_vdot_logic(merged):
@@ -105,6 +111,90 @@ def save_profile(profile: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shoe Management Helpers
+# ---------------------------------------------------------------------------
+
+def add_shoe(nickname: str, model: str, current_km: float = 0.0, target_km: float = 600.0) -> dict:
+    """Add a new pair of shoes to the profile.
+
+    Args:
+        nickname: Unique identifier for the shoe.
+        model: Brand and model name.
+        current_km: Starting mileage.
+        target_km: Expected lifespan in km.
+
+    Returns:
+        The newly created shoe dict.
+    """
+    profile = load_profile()
+    
+    # Check for duplicate nickname
+    for shoe in profile["shoes"]:
+        if shoe["nickname"] == nickname:
+            shoe["model"] = model
+            shoe["current_km"] = current_km
+            shoe["target_km"] = target_km
+            shoe["status"] = "active"
+            save_profile(profile)
+            return shoe
+
+    entry = {
+        "nickname": nickname,
+        "model": model,
+        "current_km": float(current_km),
+        "target_km": float(target_km),
+        "status": "active", # 'active' | 'retired'
+        "added_date": datetime.date.today().isoformat()
+    }
+    profile["shoes"].append(entry)
+    save_profile(profile)
+    return entry
+
+
+def get_active_shoes() -> list:
+    """Return all shoes with status 'active'."""
+    profile = load_profile()
+    return [s for s in profile.get("shoes", []) if s.get("status") == "active"]
+
+
+def update_shoe_mileage(nickname: str, added_km: float) -> Optional[dict]:
+    """Add mileage to a specific shoe.
+
+    Args:
+        nickname: Unique identifier for the shoe.
+        added_km: Kilometres to add.
+
+    Returns:
+        Updated shoe dict, or None if not found.
+    """
+    profile = load_profile()
+    for shoe in profile.get("shoes", []):
+        if shoe["nickname"] == nickname:
+            shoe["current_km"] = round(shoe["current_km"] + added_km, 2)
+            save_profile(profile)
+            return shoe
+    return None
+
+
+def retire_shoe(nickname: str) -> Optional[dict]:
+    """Mark a shoe as retired.
+
+    Args:
+        nickname: Unique identifier for the shoe.
+
+    Returns:
+        Updated shoe dict, or None if not found.
+    """
+    profile = load_profile()
+    for shoe in profile.get("shoes", []):
+        if shoe["nickname"] == nickname:
+            shoe["status"] = "retired"
+            save_profile(profile)
+            return shoe
+    return None
+
+
+# ---------------------------------------------------------------------------
 # VDOT & Pace Management
 # ---------------------------------------------------------------------------
 
@@ -115,7 +205,18 @@ def _parse_time_to_seconds(time_str: str) -> int:
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
     elif len(parts) == 2:
         return int(parts[0]) * 60 + int(parts[1])
-    return 0
+    return int(parts[0])
+
+def _format_seconds_to_time(seconds: float) -> str:
+    """Convert seconds to HH:MM:SS or MM:SS format."""
+    s = int(round(seconds))
+    hrs = s // 3600
+    mins = (s % 3600) // 60
+    secs = s % 60
+    if hrs > 0:
+        return f"{hrs}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
+
 
 
 def _refresh_vdot_logic(profile: dict) -> bool:
@@ -574,16 +675,18 @@ def load_goal() -> Optional[dict]:
         "race_date": profile.get("target_race_date"),
         "race_distance_km": profile.get("target_race_distance_km", 42.195),
         "race_name": profile.get("target_race_name", ""),
+        "target_time": profile.get("target_race_time"),
     }
 
 
-def save_goal(race_date: str, race_distance_km: float, race_name: str = "") -> dict:
+def save_goal(race_date: str, race_distance_km: float, race_name: str = "", target_time: Optional[str] = None) -> dict:
     """Persist a race goal to the athlete profile.
 
     Args:
         race_date: ISO-format date string (YYYY-MM-DD).
         race_distance_km: Race distance in kilometres.
         race_name: Optional human-readable name for the race.
+        target_time: Optional target finish time (HH:MM:SS).
 
     Returns:
         The saved goal dict.
@@ -593,6 +696,8 @@ def save_goal(race_date: str, race_distance_km: float, race_name: str = "") -> d
     profile["target_race_date"] = race_date
     profile["target_race_distance_km"] = race_distance_km
     profile["target_race_name"] = race_name
+    if target_time:
+        profile["target_race_time"] = target_time
 
     # Save directly first to ensure custom fields are there
     save_profile(profile)
@@ -604,6 +709,7 @@ def save_goal(race_date: str, race_distance_km: float, race_name: str = "") -> d
         "race_date": race_date,
         "race_distance_km": race_distance_km,
         "race_name": race_name,
+        "target_time": target_time,
     }
 
 
@@ -710,7 +816,9 @@ def format_profile_summary(profile: Optional[dict] = None, include_insights: boo
         try:
             trd = datetime.date.fromisoformat(target)
             days_left = (trd - datetime.date.today()).days
-            lines.append(f"• **目標賽事**：{target} (剩餘 {days_left} 天)")
+            target_time = p.get("target_race_time")
+            time_str = f" (目標時間: {target_time})" if target_time else ""
+            lines.append(f"• **目標賽事**：{target} (剩餘 {days_left} 天){time_str}")
         except Exception:
             pass
     lines.append(f"• **級別特性**：{level_info['description']} (週跑量上限 {level_info['max_weekly_km']}km)")
@@ -806,6 +914,19 @@ def format_profile_summary(profile: Optional[dict] = None, include_insights: boo
         lines.append("\n### 📝 教練備忘")
         for n in notes:
             lines.append(f"• {n['date']}：{n['note']}")
+
+    # Shoes
+    active_shoes = get_active_shoes()
+    if active_shoes:
+        lines.append("\n### 👟 跑鞋退役進度")
+        for s in active_shoes:
+            prog = (s['current_km'] / s['target_km']) * 100 if s['target_km'] > 0 else 0
+            bar_len = 10
+            filled = int(prog / (100 / bar_len))
+            bar = "█" * filled + "░" * (bar_len - filled)
+            status_emoji = "⚠️" if prog > 90 else "✅"
+            lines.append(f"• {s['nickname']} ({s['model']}):")
+            lines.append(f"  {bar} {prog:.1f}% ({s['current_km']:.1f}/{s['target_km']:.1f} km) {status_emoji}")
 
     # Long-term insights
     if include_insights:

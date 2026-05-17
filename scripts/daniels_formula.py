@@ -72,6 +72,64 @@ def calculate_paces(vdot: float) -> Dict[str, str]:
         
     return paces
 
+def estimate_vdot_from_run(
+    distance_meters: float, 
+    time_seconds: float, 
+    avg_hr: float, 
+    max_hr: float, 
+    rest_hr: float
+) -> float:
+    """
+    Estimate VDOT from a submaximal run.
+    Relies on the linear relationship between %HRR and %VO2max.
+    VO2_actual = -4.60 + 0.182258 * V + 0.000104 * V^2
+    %VO2max approx= %HRR = (avg_hr - rest_hr) / (max_hr - rest_hr)
+    VDOT_est = VO2_actual / %VO2max
+    """
+    if max_hr <= rest_hr or avg_hr <= rest_hr:
+        return 0.0
+        
+    t_min = time_seconds / 60.0
+    v = distance_meters / t_min
+    
+    # Calculate VO2 for this velocity
+    vo2_actual = -4.60 + 0.182258 * v + 0.000104 * pow(v, 2)
+    
+    # Calculate intensity as % of Heart Rate Reserve
+    percent_hrr = (avg_hr - rest_hr) / (max_hr - rest_hr)
+    
+    # Daniels notes that %HRR is a very good proxy for %VO2max
+    if percent_hrr <= 0.4: # Too low intensity for reliable estimation
+        return 0.0
+        
+    vdot_est = vo2_actual / percent_hrr
+    return round(vdot_est, 2)
+
+def calculate_time_for_vdot(distance_meters: float, vdot: float) -> float:
+    """
+    Find the finish time (in seconds) for a given distance and VDOT.
+    Uses binary search since both VO2 and %VO2max depend on time.
+    """
+    if vdot <= 0:
+        return 0.0
+        
+    # Search range: 1 minute to 1000 minutes
+    low = 60.0
+    high = 60000.0
+    
+    for _ in range(50): # 50 iterations for high precision
+        mid_t = (low + high) / 2
+        est_vdot = calculate_vdot(distance_meters, mid_t)
+        
+        if est_vdot < vdot:
+            # Too slow, need less time
+            high = mid_t
+        else:
+            # Too fast, need more time
+            low = mid_t
+            
+    return round(mid_t, 1)
+
 if __name__ == "__main__":
     # Quick test: 5K in 20:00 should be approx VDOT 50.5
     vdot_5k = calculate_vdot(5000, 1200)
