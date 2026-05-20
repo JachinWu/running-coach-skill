@@ -51,6 +51,12 @@ DEFAULT_PROFILE: dict = {
     "long_term_insights": [],  # List of {"date": str, "category": str, "content": str}
     "activity_feedback": [],   # List of {"activity_id": str, "date": str, "rpe": int, "pain_level": int, "pain_area": str, "notes": str}
     "shoes": [],               # List of {"nickname": str, "model": str, "current_km": float, "target_km": float, "status": str, "added_date": str}
+    "coaching_philosophy": {
+        "mode": "scientific",      # e.g., 'gentle', 'strict', 'scientific', 'companion'
+        "feedback_style": "direct", # e.g., 'direct', 'supportive', 'analytical'
+        "flexibility": "moderate",  # e.g., 'low', 'moderate', 'high'
+        "notes": "預設科學化訓練模式，強調數據驅動與生理指標。"
+    },
     "last_updated": None,
 }
 
@@ -74,13 +80,16 @@ def load_profile() -> dict:
         # Start with a fresh deep copy of defaults
         merged = copy.deepcopy(DEFAULT_PROFILE)
         
-        # Deep merge for dictionary keys like personal_bests
+        # Deep merge for dictionary keys like personal_bests and coaching_philosophy
         if "personal_bests" in stored:
             merged["personal_bests"].update(stored["personal_bests"])
         
+        if "coaching_philosophy" in stored:
+            merged["coaching_philosophy"].update(stored["coaching_philosophy"])
+        
         # Simple update for other top-level keys
         for key, value in stored.items():
-            if key != "personal_bests":
+            if key not in ("personal_bests", "coaching_philosophy"):
                 merged[key] = value
         
         # Ensure 'shoes' key exists for older profiles
@@ -782,6 +791,35 @@ def update_training_settings(
     return profile
 
 
+def update_coaching_philosophy(
+    mode: Optional[str] = None,
+    feedback_style: Optional[str] = None,
+    flexibility: Optional[str] = None,
+    notes: Optional[str] = None
+) -> dict:
+    """Update the coach's personality and philosophy settings.
+
+    Args:
+        mode: Personality mode ('gentle', 'strict', 'scientific', 'companion').
+        feedback_style: Preferred feedback style ('direct', 'supportive', 'analytical').
+        flexibility: Level of training flexibility ('low', 'moderate', 'high').
+        notes: General description or specific user preference notes.
+
+    Returns:
+        Updated profile dict.
+    """
+    profile = load_profile()
+    phil = profile.setdefault("coaching_philosophy", copy.deepcopy(DEFAULT_PROFILE["coaching_philosophy"]))
+    
+    if mode: phil["mode"] = mode
+    if feedback_style: phil["feedback_style"] = feedback_style
+    if flexibility: phil["flexibility"] = flexibility
+    if notes: phil["notes"] = notes
+    
+    save_profile(profile)
+    return profile
+
+
 # ---------------------------------------------------------------------------
 # Summary formatter (for display in Telegram / Gemini context)
 # ---------------------------------------------------------------------------
@@ -798,6 +836,20 @@ def format_profile_summary(profile: Optional[dict] = None, include_insights: boo
     """
     p = profile or load_profile()
     lines = ["## 🏅 運動員個人檔案\n"]
+
+    # Coaching Philosophy (NEW: Soul Coach Persona)
+    phil = p.get("coaching_philosophy", {})
+    if phil:
+        mode_map = {"gentle": "溫和伴跑型", "strict": "嚴格型", "scientific": "科學型", "companion": "熱血夥伴型"}
+        style_map = {"direct": "直接坦率", "supportive": "鼓勵支持", "analytical": "邏輯分析"}
+        flex_map = {"low": "計畫至上", "moderate": "適度彈性", "high": "體感優先"}
+        
+        lines.append(f"### 🧘‍♂️ 教練哲學：**{mode_map.get(phil.get('mode'), phil.get('mode'))}**")
+        lines.append(f"• **回饋風格**：{style_map.get(phil.get('feedback_style'), phil.get('feedback_style'))}")
+        lines.append(f"• **執行彈性**：{flex_map.get(phil.get('flexibility'), phil.get('flexibility'))}")
+        if phil.get("notes"):
+            lines.append(f"• **教練方針**：{phil.get('notes')}")
+        lines.append("")
 
     # Training Context (Level & Phase)
     level_code = p.get("training_level", "WHITE")

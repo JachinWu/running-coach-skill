@@ -401,11 +401,58 @@ async def get_morning_routine_data(api) -> dict:
     elif recovery.get("type") == "body_battery":
         is_risky = (recovery.get("level") or 100) < 40
 
+    # 4. Detect Missed Workouts (Yesterday) and Resolve
+    missed = await loop.run_in_executor(None, garmin.get_missed_workouts, api, 2)
+    
+    # 5. Detraining Detection (Daniels' Logic)
+    detraining_advice = None
+    profile = athlete_profile.load_profile()
+    last_act_date_str = profile.get("last_activity_date")
+    if last_act_date_str:
+        try:
+            last_date = datetime.date.fromisoformat(last_act_date_str)
+            days_missed = (datetime.date.today() - last_date).days
+            if days_missed > 5:
+                # Use detraining logic
+                from . import daniels_periodization
+                protocol = daniels_periodization.DetrainingProtocol(days_missed)
+                detraining_advice = protocol.get_recovery_plan()
+                detraining_advice["days_missed"] = days_missed
+        except Exception as e:
+            logger.error(f"Failed to calculate detraining: {e}")
+
+    # NEW: Recovery Navigator Logic
+    recovery_navigator_advice = None
+    if missed:
+        # Check today's scheduled workout for context
+        today_workout = await loop.run_in_executor(None, garmin.get_today_scheduled_workout, api)
+        
+        # We only resolve the most recent missed workout for the navigator advice
+        latest_missed = missed[-1]
+        
+        # Prepare recovery status for the resolver
+        res_status = {
+            "status": recovery.get("status", "balanced"),
+            "bb_level": recovery.get("bb_level", 100)
+        }
+        
+        decision = daniels_periodization.resolve_missed_workout(latest_missed, res_status, today_workout)
+        
+        recovery_navigator_advice = {
+            "missed_name": latest_missed.get("title") or latest_missed.get("workoutName") or "昨日訓練",
+            "action": decision.action_cn,
+            "reason": decision.reason,
+            "adjustment": decision.adjustment
+        }
+    
     return {
         "summary": summary,
         "env_summary": env_summary,
         "is_risky": is_risky,
-        "recovery": recovery
+        "recovery": recovery,
+        "missed_workouts": missed,
+        "detraining_advice": detraining_advice,
+        "recovery_navigator_advice": recovery_navigator_advice
     }
 
 async def delete_today_workout(api) -> bool:
@@ -836,17 +883,25 @@ async def run_post_run_polling(
                                     # Check for trend
                                     vdot_trend = performance_vdot.analyze_vdot_trend()
                                     if vdot_trend:
+                                        is_upgrade = vdot_trend.get("is_upgrade", True)
+                                        title = "跑力進化偵測" if is_upgrade else "跑力狀態追蹤"
+                                        desc = "數據顯示您最近的訓練表現已超越目前的設定：" if is_upgrade else "數據顯示您最近的訓練表現略低於目前的設定："
+                                        
                                         v_msg = (
-                                            f"📈 *教練觀察：跑力進化偵測*\n\n"
-                                            f"數據顯示您最近的訓練表現已超越目前的設定：\n"
+                                            f"📈 *教練觀察：{title}*\n\n"
+                                            f"{desc}\n"
                                             f"• 目前 VDOT: {vdot_trend['current_vdot']}\n"
                                             f"• 數據偵測值: *{vdot_trend['avg_vdot']}*\n\n"
                                             f"💡 {vdot_trend['reason']}\n"
                                             f"為了確保配速精準，**請問您最近的體感如何？**"
                                         )
+                                        
+                                        btn_full = "🔵 體感穩定，按數據調升" if is_upgrade else "🔵 體感確實較累，按數據調降"
+                                        btn_half = "🟡 那是全力拚搏 (調升減半)" if is_upgrade else "🟡 狀態不佳而已 (調降減半)"
+                                        
                                         v_keyboard = [
-                                            [{"text": "🔵 體感穩定，按數據調升", "callback_data": f"vdot_upgrade:full:{vdot_trend['avg_vdot']}"}],
-                                            [{"text": "🟡 那是全力拚搏 (調升減半)", "callback_data": f"vdot_upgrade:half:{vdot_trend['avg_vdot']}"}],
+                                            [{"text": btn_full, "callback_data": f"vdot_upgrade:full:{vdot_trend['avg_vdot']}"}],
+                                            [{"text": btn_half, "callback_data": f"vdot_upgrade:half:{vdot_trend['avg_vdot']}"}],
                                             [{"text": "🔴 數據異常/心率飄移", "callback_data": "vdot_upgrade:skip"}]
                                         ]
                                         await send_message_func(v_msg, v_keyboard, session_id, None)

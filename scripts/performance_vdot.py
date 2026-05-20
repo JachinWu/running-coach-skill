@@ -160,6 +160,7 @@ def analyze_vdot_trend() -> Optional[Dict[str, Any]]:
             "proposed_vdot": round(avg_vdot, 1),
             "avg_vdot": round(avg_vdot, 2),
             "improvement": round(diff, 1),
+            "is_upgrade": True,
             "reason": f"近期 {len(reliable_sessions[-MIN_SESSIONS:])} 次高品質訓練顯示您的體能有顯著進步。"
         }
     elif diff <= -VDOT_UPDATE_THRESHOLD * 2: # More conservative on down-ranking
@@ -168,6 +169,7 @@ def analyze_vdot_trend() -> Optional[Dict[str, Any]]:
             "proposed_vdot": round(avg_vdot, 1),
             "avg_vdot": round(avg_vdot, 2),
             "improvement": round(diff, 1),
+            "is_upgrade": False,
             "reason": f"近期訓練數據顯示體能略有下滑，建議暫時下修 VDOT 以確保訓練強度適中。"
         }
         

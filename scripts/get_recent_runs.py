@@ -1,6 +1,10 @@
 import sys
 import datetime
 from garmin import init_api
+try:
+    import terrain
+except ImportError:
+    from . import terrain
 
 def get_recent_runs(days=14):
     """取得最近的跑步紀錄並印出摘要"""
@@ -28,13 +32,18 @@ def get_recent_runs(days=14):
         activity_id = r.get("activityId")
         date_str = r.get("startTimeLocal", "").split(" ")[0]
         name = r.get("activityName", "未命名")
-        distance = r.get("distance", 0) / 1000.0
-        duration = r.get("duration", 0) / 60.0
+        distance_m = r.get("distance", 0)
+        duration_s = r.get("duration", 0)
         avg_hr = r.get("averageHR", 0)
         max_hr = r.get("maxHR", 0)
         avg_speed = r.get("averageSpeed", 0)
         max_speed = r.get("maxSpeed", 0)
+        elev_gain = r.get("elevationGain") or r.get("totalAscent", 0)
         
+        # Calculate NGP
+        ngp_speed = terrain.get_ngp_speed(avg_speed, elev_gain, distance_m)
+        ngp_pace_str = terrain.ms_to_pace(ngp_speed)
+
         # Training Effect
         te_label = r.get("trainingEffectLabel", "N/A")
         ae_te = r.get("aerobicTrainingEffect", 0.0)
@@ -46,17 +55,13 @@ def get_recent_runs(days=14):
         stride = r.get("avgStrideLength") or r.get("strideLength", 0)
 
         # 轉換配速
-        def speed_to_pace(speed_ms):
-            if not speed_ms or speed_ms <= 0:
-                return "0:00"
-            pace_sec = 1000 / speed_ms
-            return f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d}"
-
-        avg_pace_str = speed_to_pace(avg_speed)
-        max_pace_str = speed_to_pace(max_speed)
+        avg_pace_str = terrain.ms_to_pace(avg_speed)
+        max_pace_str = terrain.ms_to_pace(max_speed)
         
         print(f"📅 {date_str} | 🏃 {name}")
-        print(f"   [基礎] 距離: {distance:.2f} km | 時間: {duration:.1f} 分 | 均速: {avg_pace_str} /km")
+        print(f"   [基礎] 距離: {distance_m/1000.0:.2f} km | 時間: {duration_s/60.0:.1f} 分 | 均速: {avg_pace_str} /km")
+        if elev_gain > 0:
+            print(f"   [地形] 總爬升: {elev_gain:.0f} m | NGP 等效配速: {ngp_pace_str} /km")
         print(f"   [強度] 心率: {avg_hr} (最高 {max_hr}) | 最快配速: {max_pace_str} /km")
         print(f"   [成效] 標籤: {te_label} | 有氧 TE: {ae_te} | 無氧 TE: {an_te}")
         print(f"   [動態] 步頻: {cadence} spm | 步幅: {stride} cm")

@@ -35,12 +35,24 @@ try:
         add_coaching_note,
         add_milestone,
         add_physiology_record,
+        update_coaching_philosophy,
         format_profile_summary,
         load_profile,
     )
 except ImportError as e:
     print(f"❌ 無法載入 athlete_profile 模組（請確認從正確路徑執行）：{e}")
     sys.exit(1)
+
+
+def cmd_philosophy(args: argparse.Namespace) -> None:
+    """Handle 'philosophy' subcommand."""
+    update_coaching_philosophy(
+        mode=args.mode,
+        feedback_style=args.style,
+        flexibility=args.flex,
+        notes=args.notes
+    )
+    print("✅ 教練哲學與人格設定已更新。")
 
 
 def cmd_pb(args: argparse.Namespace) -> None:
@@ -149,6 +161,13 @@ def build_parser() -> argparse.ArgumentParser:
     phys_p.add_argument("--lt-pace", default=None, help="乳酸閾值配速 (例如 4:30)")
     phys_p.add_argument("--date", default=None, help="日期 YYYY-MM-DD（預設今天）")
 
+    # philosophy
+    phil_p = sub.add_parser("philosophy", help="更新教練哲學與人格設定")
+    phil_p.add_argument("--mode", help="人格模式 (gentle/strict/scientific/companion)")
+    phil_p.add_argument("--style", help="回饋風格 (direct/supportive/analytical)")
+    phil_p.add_argument("--flex", help="執行彈性 (low/moderate/high)")
+    phil_p.add_argument("--notes", help="教練方針備註")
+
     # show
     sub.add_parser("show", help="顯示目前個人檔案摘要")
 
@@ -167,6 +186,7 @@ def main() -> None:
         "note": cmd_note,
         "milestone": cmd_milestone,
         "physiology": cmd_physiology,
+        "philosophy": cmd_philosophy,
         "show": cmd_show,
     }
     dispatch[args.command](args)

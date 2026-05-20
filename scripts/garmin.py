@@ -5,6 +5,7 @@ import datetime
 from datetime import date
 from getpass import getpass
 from pathlib import Path
+from typing import Dict, Any, Optional
 
 from dotenv import load_dotenv
 env_path = Path(__file__).resolve().parents[4] / ".env"
@@ -320,6 +321,70 @@ class WorkoutFactory:
         }
 
 
+def delete_workout_on_date(client: Garmin, target_date: str) -> bool:
+    """Find and delete any scheduled workouts on a specific date.
+
+    Args:
+        client: Authenticated Garmin API object.
+        target_date: Date string in YYYY-MM-DD format.
+
+    Returns:
+        True if successful or no workout found, False on error.
+    """
+    try:
+        year, month, _ = target_date.split('-')
+        calendar_data = client.get_scheduled_workouts(int(year), int(month))
+        found = False
+        for item in calendar_data.get('calendarItems', []):
+            if item.get('date') == target_date and item.get('itemType') == 'workout':
+                old_id = item.get('workoutId')
+                print(f"  🗑️ 發現既有課表 (ID:{old_id})，執行刪除...")
+                client.delete_workout(old_id)
+                found = True
+        return True
+    except Exception as e:
+        print(f"  ❌ 刪除課表失敗: {e}")
+        return False
+
+
+def get_workout_details(client: Garmin, workout_id: int) -> dict | None:
+    """Fetch detailed JSON structure of a specific workout.
+
+    Args:
+        client: Authenticated Garmin API object.
+        workout_id: The Garmin workout ID.
+
+    Returns:
+        Workout dictionary or None if not found.
+    """
+    success, data, error = safe_api_call(client.get_workout_by_id, workout_id)
+    return data if success else None
+
+
+def flatten_workout_steps(workout_dict: dict) -> list:
+    """Flatten a Garmin workout structure into a sequential list of steps.
+    
+    Expands RepeatGroupDTOs into individual ExecutableStepDTOs.
+    """
+    if not workout_dict or "workoutSegments" not in workout_dict:
+        return []
+    
+    flat_steps = []
+    for segment in workout_dict["workoutSegments"]:
+        for step in segment.get("workoutSteps", []):
+            if step.get("type") == "RepeatGroupDTO":
+                iterations = step.get("numberOfIterations", 1)
+                sub_steps = step.get("workoutSteps", [])
+                for _ in range(iterations):
+                    for sub_step in sub_steps:
+                        # Shallow copy to avoid modifying original if needed, 
+                        # though here we mostly just need the values.
+                        flat_steps.append(sub_step)
+            else:
+                flat_steps.append(step)
+    return flat_steps
+
+
 def upload_and_replace_workout(client: Garmin, workout_json: dict) -> bool:
     """上傳課表至 Garmin Connect，若當日已有排程則先刪除再重新排程。"""
     target_date = workout_json.get('date')
@@ -331,13 +396,7 @@ def upload_and_replace_workout(client: Garmin, workout_json: dict) -> bool:
 
     try:
         # 階段 A: 清理當日舊課表
-        year, month, _ = target_date.split('-')
-        calendar_data = client.get_scheduled_workouts(int(year), int(month))
-        for item in calendar_data.get('calendarItems', []):
-            if item.get('date') == target_date and item.get('itemType') == 'workout':
-                old_id = item.get('workoutId')
-                print(f"  🗑️ 發現既有課表 (ID:{old_id})，執行刪除...")
-                client.delete_workout(old_id)
+        delete_workout_on_date(client, target_date)
 
         # 階段 B: 上傳新課表 (使用字典格式)
         workout_dict = WorkoutFactory.generate_workout_dict(workout_json)
@@ -590,10 +649,152 @@ def get_comprehensive_daily_stats(api: Garmin, days: int = 7) -> list:
 
             if acute_load:
                 data_map[target_date]["training_load"] = acute_load
+            if chronic_load:
+                data_map[target_date]["chronic_load"] = chronic_load
             if load_ratio:
                 data_map[target_date]["load_ratio"] = load_ratio
 
     return [data_map[d] for d in sorted(data_map.keys())]
+
+
+def get_multi_year_activity_history(api: Garmin, years: int = 3) -> Dict[int, Dict[int, Dict[str, float]]]:
+    """Fetch activity history for multiple years and aggregate by Quarter and Training Effect.
+    Implements a local cache to avoid heavy API calls.
+    
+    Returns:
+        {year: {q_num: {te_category: total_distance}}}
+    """
+    cache_file = Path(__file__).resolve().parent.parent / "data" / "activity_history_cache.json"
+    today = datetime.date.today()
+    
+    # 1. Load Cache
+    cache_data = {}
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r") as f:
+                cache_data = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load activity cache: {e}")
+
+    last_sync = cache_data.get("last_sync_date", "2000-01-01")
+    history = cache_data.get("history", {}) # {year_str: {q_str: {cat: dist}}}
+    
+    # Check if we need to sync (if last sync was not today)
+    if last_sync != today.isoformat():
+        start_date = today.replace(year=today.year - years + 1, month=1, day=1)
+        success, activities, error = safe_api_call(
+            api.get_activities_by_date,
+            start_date.isoformat(),
+            today.isoformat(),
+            "running"
+        )
+        
+        if success and activities:
+            new_history = {}
+            for act in activities:
+                start_time = act.get("startTimeLocal", "")
+                if not start_time: continue
+                
+                dt = datetime.datetime.fromisoformat(start_time.split('.')[0])
+                year = dt.year
+                q = (dt.month - 1) // 3 + 1
+                dist = act.get("distance", 0) / 1000.0
+                te_raw = str(act.get("aerobicTrainingEffectMessage", "BASE")).upper()
+                
+                cat = "基礎"
+                if "RECOVERY" in te_raw: cat = "恢復"
+                elif any(p in te_raw for p in ["TEMPO", "THRESHOLD", "VO2MAX", "HIGH_AEROBIC"]): cat = "高強度"
+                elif "ANAEROBIC" in te_raw: cat = "無氧"
+                
+                y_key = str(year)
+                q_key = str(q)
+                
+                if y_key not in new_history: new_history[y_key] = {}
+                if q_key not in new_history[y_key]: new_history[y_key][q_key] = {
+                    "恢復": 0.0, "基礎": 0.0, "高強度": 0.0, "無氧": 0.0
+                }
+                
+                new_history[y_key][q_key][cat] = round(new_history[y_key][q_key][cat] + dist, 2)
+            
+            cache_data = {
+                "last_sync_date": today.isoformat(),
+                "history": new_history
+            }
+            try:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_file, "w") as f:
+                    json.dump(cache_data, f, indent=2)
+            except Exception as e:
+                logger.error(f"Failed to save activity cache: {e}")
+                
+            history = new_history
+        else:
+            logger.warning(f"Failed to sync activity history: {error}. Using existing cache.")
+
+    result = {}
+    for y_str, q_data in history.items():
+        y_int = int(y_str)
+        result[y_int] = {}
+        for q_str, cats in q_data.items():
+            result[y_int][int(q_str)] = cats
+            
+    return result
+
+
+def get_missed_workouts(api: Garmin, days: int = 3) -> list:
+    """Identify scheduled workouts that were not completed in the past few days.
+    
+    Returns:
+        List of missed calendar items.
+    """
+    today = date.today()
+    missed = []
+    
+    # 1. Fetch calendar (Handle month boundary)
+    success, calendar_data, error = safe_api_call(
+        api.get_scheduled_workouts, today.year, today.month
+    )
+    if not success:
+        return []
+
+    # 2. Get activities for the same period
+    start_date = today - datetime.timedelta(days=days)
+    yesterday = today - datetime.timedelta(days=1)
+    
+    # We fetch ALL activities to see if the user did ANYTHING on those days
+    success_act, activities, error_act = safe_api_call(
+        api.get_activities_by_date,
+        start_date.isoformat(),
+        yesterday.isoformat(),
+        "running"
+    )
+    if not success_act:
+        activities = []
+
+    # 3. Compare
+    completed_dates = {a.get("startTimeLocal")[:10] for a in activities}
+    
+    items = (calendar_data or {}).get("calendarItems", [])
+    
+    # If today is early in the month, we might need last month's calendar too
+    if start_date.month != today.month:
+        prev_month = today.replace(day=1) - datetime.timedelta(days=1)
+        s2, c2, _ = safe_api_call(api.get_scheduled_workouts, prev_month.year, prev_month.month)
+        if s2:
+            items.extend(c2.get("calendarItems", []))
+
+    for item in items:
+        item_date_str = item.get("date")
+        if item_date_str:
+            try:
+                item_date = date.fromisoformat(item_date_str)
+                if start_date <= item_date < today:
+                    if item.get("itemType") == "workout" and item_date_str not in completed_dates:
+                        missed.append(item)
+            except ValueError:
+                continue
+    
+    return missed
 
 
 def get_upcoming_schedule(api: Garmin) -> list:
@@ -644,40 +845,86 @@ def get_upcoming_schedule(api: Garmin) -> list:
 
 
 def get_hrv_and_recovery(api: Garmin) -> dict:
-    """Get HRV status, falling back to Body Battery as recovery indicator.
+    """Get HRV status and Body Battery as recovery indicators.
 
     Args:
         api: Authenticated Garmin API object.
 
     Returns:
-        Dict with 'type' key ('hrv', 'body_battery', or 'unavailable') plus
-        relevant recovery metrics.
+        Dict with 'hrv', 'body_battery' details and 'type' for backward compatibility.
     """
     today = date.today().isoformat()
+    result = {
+        "hrv": None,
+        "body_battery": None,
+        "type": "unavailable",
+    }
 
-    # Try HRV first
-    success, hrv_data, _ = safe_api_call(api.get_hrv_data, today)
-    if success and hrv_data:
+    # 1. Fetch HRV
+    success_hrv, hrv_data, _ = safe_api_call(api.get_hrv_data, today)
+    if success_hrv and hrv_data:
         summary = hrv_data.get("hrvSummary", {})
-        return {
-            "type": "hrv",
+        result["hrv"] = {
             "weekly_avg": summary.get("weeklyAvg"),
             "last_night": summary.get("lastNightAvg") or summary.get("lastNight"),
             "status": summary.get("status", "unknown"),
         }
+        # Backward compatibility for main.py trigger
+        result.update({
+            "type": "hrv",
+            "weekly_avg": result["hrv"]["weekly_avg"],
+            "last_night": result["hrv"]["last_night"],
+            "status": result["hrv"]["status"],
+        })
 
-    # Fallback: Body Battery
-    success, bb_data, error = safe_api_call(api.get_body_battery, today, today)
-    if success and bb_data:
-        latest = bb_data[-1] if isinstance(bb_data, list) else bb_data
-        level = (
-            latest.get("charged")
-            or latest.get("bodyBatteryLevel")
-            or latest.get("level")
-        )
-        return {"type": "body_battery", "level": level}
+    # 2. Fetch Body Battery (from stats for daily summary values)
+    success_stats, stats, _ = safe_api_call(api.get_stats, today)
+    if success_stats and stats:
+        # Use highest value for morning recovery indicator
+        bb_highest = stats.get("bodyBatteryHighestValue")
+        bb_recent = stats.get("bodyBatteryMostRecentValue")
+        
+        result["body_battery"] = {
+            "highest": bb_highest,
+            "lowest": stats.get("bodyBatteryLowestValue"),
+            "most_recent": bb_recent,
+        }
+        if bb_highest:
+            result["bb_level"] = bb_highest
+            # Only set primary type if HRV is also there for "full completeness"
+            if result["hrv"] and result["hrv"].get("last_night"):
+                result["type"] = "hrv_and_bb"
+                result["level"] = bb_highest
+            elif result["type"] == "unavailable":
+                result["type"] = "body_battery"
+                result["level"] = bb_highest
+    else:
+        # Fallback to high-res BB if stats fail
+        success_bb, bb_data, _ = safe_api_call(api.get_body_battery, today, today)
+        if success_bb and bb_data:
+            # Sort to find the actual highest in the high-res data points
+            if isinstance(bb_data, list):
+                # The high-res data is usually a list of dicts like {'timestamp': ..., 'level': ...}
+                levels = [d.get("level") or d.get("bodyBatteryLevel") or 0 for d in bb_data if (d.get("level") or d.get("bodyBatteryLevel")) is not None]
+                bb_max = max(levels) if levels else 0
+                bb_now = bb_data[-1].get("level") or bb_data[-1].get("bodyBatteryLevel") or 0
+            else:
+                bb_max = bb_data.get("level") or bb_data.get("bodyBatteryLevel") or 0
+                bb_now = bb_max
 
-    return {"type": "unavailable", "error": "HRV 和 Body Battery 數據均不可用"}
+            result["body_battery"] = {"most_recent": bb_now, "highest": bb_max}
+            result["bb_level"] = bb_max
+            if result["hrv"] and result["hrv"].get("last_night"):
+                result["type"] = "hrv_and_bb"
+                result["level"] = bb_max
+            elif result["type"] == "unavailable":
+                result["type"] = "body_battery"
+                result["level"] = bb_max
+
+    if result["type"] == "unavailable":
+        result["error"] = "HRV 和 Body Battery 數據均不可用"
+
+    return result
 
 
 def get_latest_activity(api: Garmin) -> dict | None:

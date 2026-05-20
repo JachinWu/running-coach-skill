@@ -3,6 +3,7 @@ import requests
 import logging
 import datetime
 import urllib.parse
+from pathlib import Path
 from typing import Dict, Any, Optional
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
@@ -10,7 +11,7 @@ import matplotlib.font_manager as fm
 logger = logging.getLogger(__name__)
 
 
-def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "activity_chart.png") -> Optional[str]:
+def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "activity_chart.png", workout_detail: Dict[str, Any] = None) -> Optional[str]:
     """Generates a highly customized Matplotlib chart for a single activity.
     
     Returns the path to the generated image, or None if failed.
@@ -18,6 +19,7 @@ def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "a
     try:
         activity_id = activity["activityId"]
         activity_name = activity.get("activityName", "跑步活動")
+        # ... (rest of the code remains similar until Laps Targets)
         start_time_local = activity.get("startTimeLocal", "")
         
         avg_hr = activity.get("averageHR", 0)
@@ -104,7 +106,7 @@ def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "a
             except Exception: continue
 
         # --- Plotting ---
-        font_path = "/data/data/com.termux/files/home/workspace/NotoSansTC-VariableFont_wght.ttf"
+        font_path = Path(__file__).resolve().parents[4] / "NotoSansTC-VariableFont_wght.ttf"
         try:
             prop_black = fm.FontProperties(fname=font_path, weight=900)
             prop_bold = fm.FontProperties(fname=font_path, weight=700)
@@ -137,7 +139,7 @@ def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "a
         if p_y:
             ax_pace.plot(p_x, p_y, color=PACE_COLOR, linewidth=2.5, label='Pace', zorder=10)
             ax_pace.invert_yaxis()
-            ax_pace.set_ylabel('配速', color=TEXT_COLOR, fontproperties=prop_black, fontsize=LABEL_SIZE, labelpad=40)
+            ax_pace.set_ylabel('配速', color=TEXT_COLOR, fontproperties=prop_black, fontsize=LABEL_SIZE, labelpad=0)
             valid_p = [v for v in p_y if 3 < v < 15]
             if valid_p:
                 ax_pace.set_ylim(min(max(valid_p) + 0.5, 10.0), min(valid_p) - 0.5)
@@ -160,18 +162,94 @@ def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "a
         y2_max = max(metrics_vals) + 20 if metrics_vals else 200
         ax_shared.set_ylim(y2_min, y2_max)
         
-        # Laps Targets
+        # Laps/Workout Targets Alignment
         if max(distances) > 0:
+            flat_steps = []
+            if workout_detail:
+                try:
+                    from . import garmin
+                except ImportError:
+                    import garmin
+                flat_steps = garmin.flatten_workout_steps(workout_detail)
+
             current_dist = 0
-            for lap in laps:
-                l_dist = lap.get("distance", 0) / 1000.0
-                p_l, p_h = lap.get("targetPaceLow"), lap.get("targetPaceHigh")
-                if p_l and p_h:
-                    ax_pace.axhspan(1000/p_l/60, 1000/p_h/60, xmin=current_dist/max(distances), xmax=(current_dist+l_dist)/max(distances), color=PACE_COLOR, alpha=0.1, zorder=1)
-                hr_l, hr_h = lap.get("targetHeartRateLow"), lap.get("targetHeartRateHigh")
-                if hr_l and hr_h:
-                    ax_shared.axhspan(hr_l, hr_h, xmin=current_dist/max(distances), xmax=(current_dist+l_dist)/max(distances), color=HR_COLOR, alpha=0.08, zorder=1)
-                current_dist += l_dist
+            # Use the larger of metric distance or sum of laps to avoid clipping
+            total_laps_dist = sum(lap.get("distance", 0) for lap in laps) / 1000.0
+            max_total_dist = max(max(distances), total_laps_dist)
+            
+            if flat_steps:
+                step_idx = 0
+                step_accum_dist = 0
+                step_accum_time = 0
+                
+                for lap in laps:
+                    l_dist = lap.get("distance", 0) / 1000.0
+                    l_time = lap.get("duration", 0) # Garmin lap duration is usually in seconds
+                    
+                    if step_idx >= len(flat_steps):
+                        # Use lap's own targets if available
+                        p_l, p_h = lap.get("targetPaceLow"), lap.get("targetPaceHigh")
+                        hr_l, hr_h = lap.get("targetHeartRateLow"), lap.get("targetHeartRateHigh")
+                    else:
+                        step = flat_steps[step_idx]
+                        t_type = step.get("targetType", {}).get("workoutTargetTypeKey")
+                        v1 = step.get("targetValueOne")
+                        v2 = step.get("targetValueTwo")
+                        
+                        p_l, p_h = None, None
+                        hr_l, hr_h = None, None
+                        if t_type == "pace.zone" and v1 and v2:
+                            p_l, p_h = min(v1, v2), max(v1, v2)
+                        elif t_type == "heart.rate.zone" and v1 and v2:
+                            hr_l, hr_h = min(v1, v2), max(v1, v2)
+                            
+                        # Update progress in current step
+                        step_accum_dist += l_dist
+                        step_accum_time += l_time
+                        
+                        # Determine if we move to next step
+                        cond = step.get("endCondition", {})
+                        c_type = cond.get("conditionTypeKey")
+                        c_val = step.get("endConditionValue", 0)
+                        
+                        move_next = False
+                        if c_type == "time":
+                            if step_accum_time >= c_val - 2: move_next = True
+                        elif c_type == "distance":
+                            if step_accum_dist >= (c_val / 1000.0) - 0.01: move_next = True
+                        else:
+                            move_next = True # Triggered by lap button or other
+                            
+                        if move_next:
+                            step_idx += 1
+                            step_accum_dist = 0
+                            step_accum_time = 0
+
+                    # Plot this lap
+                    if l_dist > 0:
+                        x_start = current_dist / max_total_dist
+                        x_end = (current_dist + l_dist) / max_total_dist
+                        if p_l and p_h and p_l > 0 and p_h > 0:
+                            ax_pace.axhspan(1000/p_l/60, 1000/p_h/60, xmin=x_start, xmax=x_end, color=PACE_COLOR, alpha=0.1, zorder=1)
+                        if hr_l and hr_h and hr_l > 0 and hr_h > 0:
+                            ax_shared.axhspan(hr_l, hr_h, xmin=x_start, xmax=x_end, color=HR_COLOR, alpha=0.08, zorder=1)
+                    
+                    current_dist += l_dist
+            else:
+                # Fallback to Laps if no workout detail matched
+                for lap in laps:
+                    l_dist = lap.get("distance", 0) / 1000.0
+                    p_l, p_h = lap.get("targetPaceLow"), lap.get("targetPaceHigh")
+                    hr_l, hr_h = lap.get("targetHeartRateLow"), lap.get("targetHeartRateHigh")
+                    
+                    if l_dist > 0:
+                        x_start = current_dist / max_total_dist
+                        x_end = (current_dist + l_dist) / max_total_dist
+                        if p_l and p_h and p_l > 0 and p_h > 0:
+                            ax_pace.axhspan(1000/p_l/60, 1000/p_h/60, xmin=x_start, xmax=x_end, color=PACE_COLOR, alpha=0.1, zorder=1)
+                        if hr_l and hr_h and hr_l > 0 and hr_h > 0:
+                            ax_shared.axhspan(hr_l, hr_h, xmin=x_start, xmax=x_end, color=HR_COLOR, alpha=0.08, zorder=1)
+                    current_dist += l_dist
 
         # Elevation Fill
         if e_y:
@@ -226,7 +304,7 @@ def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "a
             formatted_time = dt_obj.strftime("%Y-%m-%d %H:%M")
         except: formatted_time = start_time_local
             
-        title_str = f"{clean_name} / 負荷 {int(load_val)} / 有氧 {aerobic_te} 無氧 {anaerobic_te} / {formatted_time}"
+        title_str = f"{clean_name} / 負荷 {int(load_val)} / 有氧 {aerobic_te:.1f} 無氧 {anaerobic_te:.1f} / {formatted_time}"
         fig.suptitle(title_str, color=TEXT_COLOR, fontsize=TITLE_SIZE, fontproperties=prop_black, y=0.97)
         
         # Outer Branding (Avatar + Name)
@@ -441,3 +519,126 @@ def get_weekly_chart_url(daily_data: list) -> str:
     # Fallback to long URL if short URL fails
     encoded_config = urllib.parse.quote(config_str)
     return f"https://quickchart.io/chart?c={encoded_config}&backgroundColor=%23F0F0F0&width=600&height=400&format=png"
+
+
+def generate_qoq_chart(quarterly_data: Dict[int, Dict[int, Dict[str, float]]], output_path: str = "tmp/qoq_chart.png") -> Optional[str]:
+    """Generate a clustered-stacked bar chart for Year-over-Year Quarterly comparison (QoQ).
+    
+    Args:
+        quarterly_data: {year: {q_num: {cat: distance}}}
+        output_path: Path to save the image.
+        
+    Returns:
+        The output path string if successful, else None.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.font_manager as fm
+        import numpy as np
+        
+        # 1. Setup Font with specific sizes
+        font_path = Path(__file__).resolve().parents[4] / "NotoSansTC-VariableFont_wght.ttf"
+        
+        def get_prop(size, weight='normal'):
+            if font_path.exists():
+                return fm.FontProperties(fname=str(font_path), size=size, weight=weight)
+            else:
+                return fm.FontProperties(size=size, weight=weight)
+
+        prop_title = get_prop(32, weight='bold')
+        prop_axes = get_prop(26)
+        prop_ticks = get_prop(26)
+        prop_bar = get_prop(22)
+        prop_legend = get_prop(26)
+
+        # 2. Colors and Data Constants
+        TE_COLORS = {
+            "恢復": "#949494",
+            "基礎": "#65D9E8",
+            "高強度": "#FD9D39",
+            "無氧": "#A98DFC"
+        }
+        TE_ORDER = ["恢復", "基礎", "高強度", "無氧"]
+        
+        years = sorted(quarterly_data.keys())
+        if not years:
+            return None
+            
+        # We want to show at most last 3 years
+        years = years[-3:]
+        n_years = len(years)
+        
+        # Alpha values based on relative year index
+        # If n_years=3: 0 (3 years ago) -> 0.3, 1 (last year) -> 0.6, 2 (this year) -> 1.0
+        # If n_years=1: 0 (this year) -> 1.0
+        alphas = [0.3, 0.6, 1.0]
+        if n_years == 2:
+            alphas = [0.6, 1.0]
+        elif n_years == 1:
+            alphas = [1.0]
+            
+        quarters = ["Q1", "Q2", "Q3", "Q4"]
+        n_qs = len(quarters)
+        
+        # 3. Plotting Setup
+        fig, ax = plt.subplots(figsize=(18, 12), dpi=100)
+        fig.set_facecolor("#FAFAF7")
+        ax.set_facecolor("#FAFAF7")
+        
+        width = 0.22 
+        x = np.arange(n_qs)
+        offsets = np.linspace(-width, width, n_years) if n_years > 1 else [0]
+        
+        # 4. Draw Bars
+        for i, year in enumerate(years):
+            bottoms = np.zeros(n_qs)
+            alpha = alphas[i]
+            
+            for cat in TE_ORDER:
+                values = []
+                for q in range(1, 5):
+                    val = quarterly_data.get(year, {}).get(q, {}).get(cat, 0.0)
+                    values.append(val)
+                
+                ax.bar(x + offsets[i], values, width, bottom=bottoms, 
+                       color=TE_COLORS[cat], alpha=alpha, edgecolor='white', linewidth=0.5)
+                
+                bottoms += np.array(values)
+            
+            # Add year labels above bars
+            for q_idx, total in enumerate(bottoms):
+                if total > 0:
+                    ax.text(x[q_idx] + offsets[i], total + 5, f"{year}", 
+                            ha='center', va='bottom', fontproperties=prop_bar, color="#57534E")
+
+        # 5. Formatting
+        ax.set_xticks(x)
+        ax.set_xticklabels(quarters, fontproperties=prop_ticks)
+        ax.set_ylabel("累積里程 (km)", fontproperties=prop_axes)
+        ax.tick_params(axis='both', which='major', labelsize=26)
+        
+        # Ensure tick labels use the font
+        for label in ax.get_xticklabels():
+            label.set_fontproperties(prop_ticks)
+        for label in ax.get_yticklabels():
+            label.set_fontproperties(prop_ticks)
+            
+        ax.set_title("年度季度趨勢對比 (QoQ Performance Analysis)", fontproperties=prop_title, pad=40)
+        
+        # Category Legend
+        cat_handles = [plt.Rectangle((0,0),1,1, color=TE_COLORS[cat]) for cat in TE_ORDER]
+        cat_legend = ax.legend(cat_handles, TE_ORDER, loc='upper left', bbox_to_anchor=(1, 1), 
+                               title="訓練效果 (TE)", prop=prop_legend)
+        plt.setp(cat_legend.get_title(), fontproperties=prop_legend)
+        
+        ax.grid(axis='y', linestyle='--', alpha=0.3, color="#D6D3D1")
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+        return output_path
+    except Exception as e:
+        logger.error(f"Failed to generate QoQ chart: {e}")
+        return None
