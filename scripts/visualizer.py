@@ -3,12 +3,111 @@ import requests
 import logging
 import datetime
 import urllib.parse
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 
 logger = logging.getLogger(__name__)
+
+
+import numpy as np
+
+from PIL import Image, ImageEnhance, ImageDraw
+
+def generate_radar_chart(scores: Dict[str, float], genre: str, output_path: str = "radar_chart.png", bg_image_path: Optional[str] = None) -> Optional[str]:
+    """Generates a professional radar chart for runner combat metrics with optional background."""
+    try:
+        labels = list(scores.keys())
+        values = list(scores.values())
+        num_vars = len(labels)
+
+        angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+        values += values[:1]
+        angles += angles[:1]
+        labels += labels[:1]
+
+        font_path = Path(__file__).resolve().parents[4] / "NotoSansTC-VariableFont_wght.ttf"
+        try:
+            prop_bold = fm.FontProperties(fname=font_path, weight=700)
+            prop_black = fm.FontProperties(fname=font_path, weight=900)
+        except:
+            prop_bold = fm.FontProperties(weight='bold')
+            prop_black = fm.FontProperties(weight='black')
+
+        # Colors for the chart - adjust for visibility if bg is present
+        BG_COLOR = "#FAFAF7" if not bg_image_path else "none"
+        PRIMARY_COLOR = "#2F80ED"
+        AXIS_COLOR = "#78716C" if not bg_image_path else "#FFFFFF"
+        TEXT_COLOR = "#2B2B2B" if not bg_image_path else "#FFFFFF"
+
+        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True), dpi=100)
+        fig.set_facecolor(BG_COLOR)
+        ax.set_facecolor(BG_COLOR)
+
+        plt.xticks(angles[:-1], labels[:-1], color=TEXT_COLOR, fontproperties=prop_bold, fontsize=20)
+        ax.set_rscale('linear')
+        plt.yticks([20, 40, 60, 80, 100], ["20", "40", "60", "80", "100"], color=AXIS_COLOR, size=12)
+        plt.ylim(0, 100)
+
+        ax.plot(angles, values, color=PRIMARY_COLOR, linewidth=4, linestyle='solid', zorder=10)
+        ax.fill(angles, values, color=PRIMARY_COLOR, alpha=0.35, zorder=5)
+
+        plt.title(f"當前流派：{genre}", fontproperties=prop_black, size=28, color=TEXT_COLOR, y=1.1)
+
+        for angle, val, label in zip(angles[:-1], values[:-1], labels[:-1]):
+            ax.text(angle, val + 10, f"{int(val)}", ha='center', va='center', fontproperties=prop_bold, fontsize=18, color=PRIMARY_COLOR)
+
+        ax.spines['polar'].set_color(AXIS_COLOR)
+        ax.spines['polar'].set_linewidth(2)
+        ax.grid(color=AXIS_COLOR, linestyle='--', alpha=0.6)
+
+        plt.tight_layout()
+        
+        # Save the radar part
+        # Use a more robust temporary path
+        import tempfile
+        fd, temp_chart_path = tempfile.mkstemp(suffix=".png", prefix="radar_only_")
+        os.close(fd)
+        
+        plt.savefig(temp_chart_path, dpi=100, transparent=True)
+        plt.close(fig)
+
+        # Handle Background Blending with Pillow
+        if bg_image_path and os.path.exists(bg_image_path):
+            bg = Image.open(bg_image_path).convert("RGBA")
+            bg = bg.resize((1000, 1000), Image.Resampling.LANCZOS)
+            
+            # 1. Darken Background for readability
+            enhancer = ImageEnhance.Brightness(bg)
+            bg = enhancer.enhance(0.4) # 40% brightness
+            
+            # 2. Paste Radar Chart
+            radar = Image.open(temp_chart_path).convert("RGBA")
+            bg.paste(radar, (0, 0), radar)
+            
+            bg.save(output_path)
+            if os.path.exists(temp_chart_path):
+                os.remove(temp_chart_path)
+        else:
+            # Re-generate with normal background if no bg provided
+            if os.path.exists(temp_chart_path):
+                img = Image.open(temp_chart_path).convert("RGBA")
+                # Add white background
+                white_bg = Image.new("RGBA", img.size, "#FAFAF7")
+                combined = Image.alpha_composite(white_bg, img)
+                combined.save(output_path)
+                os.remove(temp_chart_path)
+            else:
+                return None
+                
+        return output_path
+    except Exception as e:
+        logger.error(f"Failed to generate radar chart: {e}")
+        return None
 
 
 def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "activity_chart.png", workout_detail: Dict[str, Any] = None) -> Optional[str]:
@@ -329,11 +428,12 @@ def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "a
         return None
 
 
-def get_weekly_chart_url(daily_data: list) -> str:
+def get_weekly_chart_url(daily_data: list, title_prefix: str = "週報") -> str:
     """Generate a QuickChart Short URL for the weekly comprehensive report.
 
     Args:
         daily_data: List of dicts [{'date': '...', 'distance_km': ..., 'hrv': ..., 'runs': [{'distance': ..., 'te': ...}], ...}, ...]
+        title_prefix: Optional prefix for the chart title (default: "週報").
 
     Returns:
         Short URL string pointing to the chart image.
@@ -461,11 +561,14 @@ def get_weekly_chart_url(daily_data: list) -> str:
             }
         })
 
+    title_text = f"{title_prefix}: " if title_prefix else ""
+    full_title = f"{title_text}訓練與恢復趨勢 (總計: {total_dist} km)"
+
     chart_config = {
         "type": "bar",
         "data": {"labels": labels, "datasets": datasets},
         "options": {
-            "title": {"display": True, "text": f"週報: 訓練與恢復趨勢 (總計: {total_dist} km)", "fontSize": 16},
+            "title": {"display": True, "text": full_title, "fontSize": 16},
             "legend": {
                 "position": "bottom",
                 "labels": {

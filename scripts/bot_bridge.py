@@ -23,6 +23,9 @@ try:
     from . import hrv_guardrail
     from . import weather
     from . import performance_vdot
+    from . import daniels_periodization
+    from . import performance_radar
+    from . import image_generator
 except ImportError:
     import garmin
     import athlete_profile
@@ -30,6 +33,9 @@ except ImportError:
     import hrv_guardrail
     import weather
     import performance_vdot
+    import daniels_periodization
+    import performance_radar
+    import image_generator
 
 import requests
 import tempfile
@@ -211,6 +217,37 @@ def get_tsb_analysis(atl: float, ctl: float) -> tuple[float, str, str]:
         return tsb, "🟢 訓練產出期 (Optimal)", "目前處於高效訓練區，雖有疲勞但體能進步最快。"
     else:
         return tsb, "🔴 疲勞過度 (Overreaching)", "疲勞累積過高，建議降低強度或增加休息，嚴防受傷。"
+
+async def _download_chart_to_temp(chart_url: str) -> Optional[Dict[str, str]]:
+    """Download a chart image from a URL and save it to a temporary directory."""
+    if not chart_url:
+        return None
+
+    loop = asyncio.get_event_loop()
+    temp_dir = tempfile.mkdtemp()
+    photo_path = os.path.join(temp_dir, f"chart_{uuid.uuid4().hex[:8]}.png")
+
+    try:
+        def download():
+            response = requests.get(chart_url, timeout=20)
+            if response.status_code == 200:
+                with open(photo_path, "wb") as f:
+                    f.write(response.content)
+                return True
+            return False
+
+        success = await loop.run_in_executor(None, download)
+        if success:
+            return {"photo_path": photo_path, "temp_dir": temp_dir}
+        else:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None
+
+    except Exception as e:
+        logger.error(f"Error downloading chart: {e}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+
 
 async def get_today_summary(api) -> str:
     """Logic for /today command, providing context for the Dynamic Guardrail."""
@@ -414,7 +451,6 @@ async def get_morning_routine_data(api) -> dict:
             days_missed = (datetime.date.today() - last_date).days
             if days_missed > 5:
                 # Use detraining logic
-                from . import daniels_periodization
                 protocol = daniels_periodization.DetrainingProtocol(days_missed)
                 detraining_advice = protocol.get_recovery_plan()
                 detraining_advice["days_missed"] = days_missed
@@ -444,7 +480,12 @@ async def get_morning_routine_data(api) -> dict:
             "reason": decision.reason,
             "adjustment": decision.adjustment
         }
-    
+
+    # 6. Fetch 7-day trend chart (requested for morning report)
+    daily_list = await loop.run_in_executor(None, garmin.get_comprehensive_daily_stats, api, 7)
+    chart_url = visualizer.get_weekly_chart_url(daily_list, title_prefix="")
+    chart_data = await _download_chart_to_temp(chart_url)
+
     return {
         "summary": summary,
         "env_summary": env_summary,
@@ -452,7 +493,9 @@ async def get_morning_routine_data(api) -> dict:
         "recovery": recovery,
         "missed_workouts": missed,
         "detraining_advice": detraining_advice,
-        "recovery_navigator_advice": recovery_navigator_advice
+        "recovery_navigator_advice": recovery_navigator_advice,
+        "chart_photo_path": chart_data["photo_path"] if chart_data else None,
+        "chart_temp_dir": chart_data["temp_dir"] if chart_data else None
     }
 
 async def delete_today_workout(api) -> bool:
@@ -475,6 +518,108 @@ async def upload_and_replace_workout(api, workout_json: dict) -> bool:
     return await loop.run_in_executor(None, garmin.upload_and_replace_workout, api, workout_json)
 
 
+async def get_radar_report(api) -> Dict[str, Any]:
+    """Logic for /radar command. Aggregates 4-week stats and generates combat radar."""
+    loop = asyncio.get_event_loop()
+    
+    try:
+        # 1. Fetch 4 weeks of comprehensive data (28 days)
+        daily_list = await loop.run_in_executor(None, garmin.get_comprehensive_daily_stats, api, 28)
+        if not daily_list or (isinstance(daily_list[0], dict) and "error" in daily_list[0]):
+            return {"error": daily_list[0].get("error", "無法獲取數據")}
+
+        # 2. Aggregate Metrics
+        total_dist = sum(d.get("distance_km", 0) for d in daily_list)
+        avg_weekly_dist = total_dist / 4.0
+        
+        activities_count = sum(1 for d in daily_list if d.get("distance_km", 0) > 0)
+        total_elev_gain = 0.0 # Garmin daily stats might not have elevation, let's try activities
+        
+        hrv_values = [d.get("hrv", 0) for d in daily_list if d.get("hrv", 0) > 0]
+        avg_hrv = sum(hrv_values) / len(hrv_values) if hrv_values else 0
+        
+        # We need elevation gain. Since daily stats are limited, let's fetch activities.
+        today = datetime.date.today()
+        start_date = today - datetime.timedelta(days=27)
+        success_act, activities, _ = await loop.run_in_executor(
+            None, 
+            garmin.safe_api_call, 
+            api.get_activities_by_date, 
+            start_date.isoformat(), 
+            today.isoformat(), 
+            "running"
+        )
+        if success_act and activities:
+            total_elev_gain = sum(a.get("elevationGain", 0) for a in activities)
+
+        # 3. Calculate Scores and Genre
+        profile = athlete_profile.load_profile()
+        vdot = profile.get("vdot", 40.0)
+        
+        # Standardizing inputs for the radar logic
+        # HRV Stability: use current vs 7-day avg or just normalized hrv
+        # For simplicity, we use avg_hrv / 80.0 as stability indicator
+        hrv_stability = min(1.0, avg_hrv / 80.0) if avg_hrv > 0 else 0.5
+
+        scores = performance_radar.calculate_radar_scores(
+            weekly_dist_km=avg_weekly_dist,
+            vdot=vdot,
+            frequency_days=int(activities_count / 4.0 * 7), # extrapolated to week
+            total_elev_gain=total_elev_gain / 4.0, # avg weekly elev
+            hrv_stability=hrv_stability
+        )
+        genre = performance_radar.determine_genre(scores)
+        gender = profile.get("gender", "male")
+
+        # 4. Generate Background and Chart
+        temp_dir = tempfile.mkdtemp()
+        bg_path = os.path.join(temp_dir, "radar_bg.png")
+        output_path = os.path.join(temp_dir, "radar_report.png")
+        
+        bg_res = await loop.run_in_executor(None, image_generator.generate_genre_background, genre, bg_path, gender)
+        bg_success, bg_url = bg_res if isinstance(bg_res, tuple) else (bg_res, None)
+        
+        chart_path = await loop.run_in_executor(
+            None, 
+            visualizer.generate_radar_chart, 
+            scores, 
+            genre, 
+            output_path, 
+            bg_path if bg_success else None
+        )
+        
+        if not chart_path:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return {"error": "無法生成雷達圖表"}
+
+        # 5. Prepare Caption
+        caption = (
+            f"🛡️ **跑者戰力雷達圖 (v2.0)**\n\n"
+            f"根據過去 4 週的訓練數據與跑力表現，教練為您定義的目前流派為：\n"
+            f"🏆 **【{genre}】**\n\n"
+            f"📊 **維度評分**：\n"
+            f"• 耐力：{scores['耐力']}\n"
+            f"• 速度：{scores['速度']}\n"
+            f"• 一致性：{scores['一致性']}\n"
+            f"• 地形適應：{scores['地形適應']}\n"
+            f"• 恢復力：{scores['恢復力']}\n\n"
+            f"💡 *教練點評*：這張圖展現了您目前的發展重心。{performance_radar.GENRE_PROMPTS.get(genre, '')}"
+        )
+
+        return {
+            "caption": caption,
+            "photo_path": chart_path,
+            "temp_dir": temp_dir,
+            "genre": genre,
+            "scores": scores,
+            "bg_url": bg_url
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating radar report: {e}")
+        return {"error": str(e)}
+
+
 async def get_weekly_report_data(api) -> dict:
     """Logic for /report command (Integrated with /status info).
     
@@ -495,28 +640,12 @@ async def get_weekly_report_data(api) -> dict:
     upcoming = await loop.run_in_executor(None, garmin.get_upcoming_schedule, api)
 
     chart_url = visualizer.get_weekly_chart_url(daily_list)
-    
-    # Download the chart to a temp file
-    temp_dir = tempfile.mkdtemp()
-    photo_path = os.path.join(temp_dir, "weekly_report.png")
-    
-    try:
-        def download():
-            response = requests.get(chart_url, timeout=20)
-            if response.status_code == 200:
-                with open(photo_path, "wb") as f:
-                    f.write(response.content)
-                return True
-            return False
+    chart_data = await _download_chart_to_temp(chart_url)
+    if not chart_data:
+        return {"error": "無法獲取綜合圖表圖片"}
 
-        success = await loop.run_in_executor(None, download)
-        if not success:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return {"error": "無法從 QuickChart 下載綜合圖表圖片"}
-            
-    except Exception as e:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return {"error": f"下載圖表發生錯誤: {e}"}
+    photo_path = chart_data["photo_path"]
+    temp_dir = chart_data["temp_dir"]
 
     # Find latest valid metrics (non-zero load/hrv/bb) for the top summary
     latest_metrics = daily_list[-1]
@@ -620,10 +749,10 @@ async def recommend_training_level(api) -> dict:
     }
 
 
-async def get_profile_summary(include_insights: bool = True) -> str:
+async def get_profile_summary(include_insights: bool = True, include_notes: bool = True) -> str:
     """Logic for /profile command."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, athlete_profile.format_profile_summary, None, include_insights)
+    return await loop.run_in_executor(None, athlete_profile.format_profile_summary, None, include_insights, include_notes)
 
 async def get_goal_summary(subcommand: str, args: List[str]) -> str:
     """Logic for /goal command."""

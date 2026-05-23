@@ -233,7 +233,12 @@ def _refresh_vdot_logic(profile: dict) -> bool:
     Returns True if changes were made.
     """
     pbs = profile.get("personal_bests", {})
+    current_vdot = profile.get("vdot", 0.0) or 0.0
     max_vdot = 0.0
+    
+    # Daniels' rule of thumb: Recent performance (last 6 months) is most relevant for current VDOT
+    # We only apply this filter if we already have a baseline VDOT, to avoid empty profiles.
+    six_months_ago = (datetime.date.today() - datetime.timedelta(days=180)).isoformat()
     
     distance_map = {
         "5k": 5000,
@@ -248,6 +253,12 @@ def _refresh_vdot_logic(profile: dict) -> bool:
         
         # Use the latest PB entry for that distance
         latest_pb = entries[-1]
+        
+        # If we have a current VDOT and the PB is ancient, ignore it for auto-recalc 
+        # (unless it's the only one we have and current_vdot is 0)
+        if current_vdot > 0 and latest_pb.get("date", "") < six_months_ago:
+            continue
+            
         try:
             seconds = _parse_time_to_seconds(latest_pb["time"])
             if seconds > 0:
@@ -258,9 +269,12 @@ def _refresh_vdot_logic(profile: dict) -> bool:
         except Exception:
             continue
             
-    if max_vdot > 0:
+    # Only update if the PB-derived VDOT is an UPGRADE to our current state
+    # This prevents older PBs from overwriting dynamic downgrades (detraining)
+    if max_vdot > current_vdot or (current_vdot == 0 and max_vdot > 0):
         profile["vdot"] = max_vdot
         profile["training_paces"] = daniels_formula.calculate_paces(max_vdot)
+        profile["last_updated"] = datetime.datetime.now().isoformat()
         return True
     return False
 
@@ -274,6 +288,26 @@ def refresh_vdot_and_paces() -> dict:
     profile = load_profile()
     if _refresh_vdot_logic(profile):
         save_profile(profile)
+    return profile
+
+
+def update_vdot(new_vdot: float) -> dict:
+    """Manually update VDOT and recalculate paces.
+    
+    This is used for dynamic VDOT adjustments (post-run) or detraining 
+    modifications that are not directly based on a new PB.
+
+    Args:
+        new_vdot: The new VDOT value to set.
+
+    Returns:
+        Updated profile dictionary.
+    """
+    profile = load_profile()
+    profile["vdot"] = new_vdot
+    profile["training_paces"] = daniels_formula.calculate_paces(new_vdot)
+    profile["last_updated"] = datetime.datetime.now().isoformat()
+    save_profile(profile)
     return profile
 
 
@@ -824,12 +858,13 @@ def update_coaching_philosophy(
 # Summary formatter (for display in Telegram / Gemini context)
 # ---------------------------------------------------------------------------
 
-def format_profile_summary(profile: Optional[dict] = None, include_insights: bool = True) -> str:
+def format_profile_summary(profile: Optional[dict] = None, include_insights: bool = True, include_notes: bool = True) -> str:
     """Return a human-readable Markdown summary of the athlete profile.
 
     Args:
         profile: Optional pre-loaded profile dict.
         include_insights: Whether to include the long-term insights section.
+        include_notes: Whether to include the coaching notes section.
 
     Returns:
         Formatted Markdown string.
@@ -961,11 +996,12 @@ def format_profile_summary(profile: Optional[dict] = None, include_insights: boo
             lines.append(f"• {m['date']}：{m['description']}")
 
     # Recent coaching notes
-    notes = p.get("coaching_notes", [])[-3:]
-    if notes:
-        lines.append("\n### 📝 教練備忘")
-        for n in notes:
-            lines.append(f"• {n['date']}：{n['note']}")
+    if include_notes:
+        notes = p.get("coaching_notes", [])[-3:]
+        if notes:
+            lines.append("\n### 📝 教練備忘")
+            for n in notes:
+                lines.append(f"• {n['date']}：{n['note']}")
 
     # Shoes
     active_shoes = get_active_shoes()
