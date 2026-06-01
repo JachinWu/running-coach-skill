@@ -83,9 +83,9 @@ A specialized AI running coach for analyzing data, planning workouts, and syncin
 
 ## Usage | 使用方式
 
-The skill is designed to be triggered by the Gemini CLI agent. You can also run individual scripts for manual management:
+The skill is designed to be triggered by the Antigravity CLI agent. You can also run individual scripts for manual management:
 
-此技能設計由 Gemini CLI 代理觸發。您也可以手動執行個別腳本進行管理：
+此技能設計由 Antigravity CLI 代理觸發。您也可以手動執行個別腳本進行管理：
 
 - **Onboarding/Setup**: `/setup` (via Telegram) or manually via `bot_bridge`.
 - **Check Profile**: `python scripts/update_profile.py show`
@@ -93,4 +93,4 @@ The skill is designed to be triggered by the Gemini CLI agent. You can also run 
 - **View Recent Runs**: `python scripts/get_recent_runs.py`
 
 ---
-*Created by Gemini-CLI Running Coach Module*
+*Created by Antigravity-CLI Running Coach Module*

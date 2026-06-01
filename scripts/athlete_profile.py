@@ -58,6 +58,7 @@ DEFAULT_PROFILE: dict = {
         "notes": "預設科學化訓練模式，強調數據驅動與生理指標。"
     },
     "last_updated": None,
+    "character_card_type": "MaleAnime",
 }
 
 

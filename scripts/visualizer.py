@@ -18,6 +18,16 @@ import numpy as np
 
 from PIL import Image, ImageEnhance, ImageDraw
 
+def speed_to_pace(speed_ms: float) -> str:
+    """Convert speed in m/s to pace (min:sec) per km."""
+    if not speed_ms or speed_ms <= 0:
+        return "0:00"
+    total_seconds = 1000 / speed_ms
+    minutes = int(total_seconds // 60)
+    seconds = int(total_seconds % 60)
+    return f"{minutes}:{seconds:02d}"
+
+
 def generate_radar_chart(scores: Dict[str, float], genre: str, output_path: str = "radar_chart.png", bg_image_path: Optional[str] = None) -> Optional[str]:
     """Generates a professional radar chart for runner combat metrics with optional background."""
     try:
@@ -30,7 +40,7 @@ def generate_radar_chart(scores: Dict[str, float], genre: str, output_path: str 
         angles += angles[:1]
         labels += labels[:1]
 
-        font_path = Path(__file__).resolve().parents[4] / "NotoSansTC-VariableFont_wght.ttf"
+        font_path = Path(__file__).resolve().parents[4] / "fonts" / "NotoSansTC-VariableFont_wght.ttf"
         try:
             prop_bold = fm.FontProperties(fname=font_path, weight=700)
             prop_black = fm.FontProperties(fname=font_path, weight=900)
@@ -39,31 +49,36 @@ def generate_radar_chart(scores: Dict[str, float], genre: str, output_path: str 
             prop_black = fm.FontProperties(weight='black')
 
         # Colors for the chart - adjust for visibility if bg is present
-        BG_COLOR = "#FAFAF7" if not bg_image_path else "none"
+        BG_COLOR = "none"
         PRIMARY_COLOR = "#2F80ED"
-        AXIS_COLOR = "#78716C" if not bg_image_path else "#FFFFFF"
-        TEXT_COLOR = "#2B2B2B" if not bg_image_path else "#FFFFFF"
+        AXIS_COLOR = "#FFFFFF" # Use white for grid and axis
+        TEXT_COLOR = "#FFFFFF" # Use white for labels
 
         fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True), dpi=100)
-        fig.set_facecolor(BG_COLOR)
-        ax.set_facecolor(BG_COLOR)
+        fig.set_facecolor("none")
+        ax.set_facecolor("none")
 
-        plt.xticks(angles[:-1], labels[:-1], color=TEXT_COLOR, fontproperties=prop_bold, fontsize=20)
+        # Increase label font size to 24
+        plt.xticks(angles[:-1], labels[:-1], color=TEXT_COLOR, fontproperties=prop_bold, fontsize=24)
         ax.set_rscale('linear')
-        plt.yticks([20, 40, 60, 80, 100], ["20", "40", "60", "80", "100"], color=AXIS_COLOR, size=12)
+        # Increase radial axis font size to 16 and color to white
+        plt.yticks([20, 40, 60, 80, 100], ["20", "40", "60", "80", "100"], color=AXIS_COLOR, size=16)
         plt.ylim(0, 100)
 
-        ax.plot(angles, values, color=PRIMARY_COLOR, linewidth=4, linestyle='solid', zorder=10)
-        ax.fill(angles, values, color=PRIMARY_COLOR, alpha=0.35, zorder=5)
+        ax.plot(angles, values, color=PRIMARY_COLOR, linewidth=5, linestyle='solid', zorder=10)
+        ax.fill(angles, values, color=PRIMARY_COLOR, alpha=0.4, zorder=5)
 
-        plt.title(f"當前流派：{genre}", fontproperties=prop_black, size=28, color=TEXT_COLOR, y=1.1)
+        # Removed title from radar chart itself to allow card to handle it
+        # plt.title(f"當前流派：{genre}", fontproperties=prop_black, size=28, color=TEXT_COLOR, y=1.1)
 
         for angle, val, label in zip(angles[:-1], values[:-1], labels[:-1]):
-            ax.text(angle, val + 10, f"{int(val)}", ha='center', va='center', fontproperties=prop_bold, fontsize=18, color=PRIMARY_COLOR)
+            # Increase value font size to 22
+            ax.text(angle, val + 12, f"{int(val)}", ha='center', va='center', fontproperties=prop_bold, fontsize=22, color="#FFFFFF")
 
         ax.spines['polar'].set_color(AXIS_COLOR)
         ax.spines['polar'].set_linewidth(2)
-        ax.grid(color=AXIS_COLOR, linestyle='--', alpha=0.6)
+        # Use white for grid
+        ax.grid(color="#FFFFFF", linestyle='--', alpha=0.5)
 
         plt.tight_layout()
         
@@ -205,7 +220,7 @@ def generate_activity_chart(api, activity: Dict[str, Any], output_path: str = "a
             except Exception: continue
 
         # --- Plotting ---
-        font_path = Path(__file__).resolve().parents[4] / "NotoSansTC-VariableFont_wght.ttf"
+        font_path = Path(__file__).resolve().parents[4] / "fonts" / "NotoSansTC-VariableFont_wght.ttf"
         try:
             prop_black = fm.FontProperties(fname=font_path, weight=900)
             prop_bold = fm.FontProperties(fname=font_path, weight=700)
@@ -640,7 +655,7 @@ def generate_qoq_chart(quarterly_data: Dict[int, Dict[int, Dict[str, float]]], o
         import numpy as np
         
         # 1. Setup Font with specific sizes
-        font_path = Path(__file__).resolve().parents[4] / "NotoSansTC-VariableFont_wght.ttf"
+        font_path = Path(__file__).resolve().parents[4] / "fonts" / "NotoSansTC-VariableFont_wght.ttf"
         
         def get_prop(size, weight='normal'):
             if font_path.exists():

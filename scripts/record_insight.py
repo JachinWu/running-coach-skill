@@ -23,8 +23,8 @@ def record_insight(content: str, category: str = "general"):
     athlete_profile.add_long_term_insight(content, category)
     
     # 2. Try to sync to Contextual Memory (Vector DB)
-    # The running-coach skill is at .gemini/skills/running-coach
-    # The contextual-memory skill is at .gemini/skills/contextual-memory
+    # The running-coach skill is at .antigravity/skills/running-coach
+    # The contextual-memory skill is at .antigravity/skills/contextual-memory
     skill_add_script = SCRIPTS_DIR.parent.parent / "contextual-memory" / "scripts" / "add_memory.py"
     
     if skill_add_script.exists():

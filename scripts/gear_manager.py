@@ -88,7 +88,32 @@ def get_shoe_stats(nickname: str) -> Dict[str, Any]:
         row = cursor.fetchone()
         avg_efficiency = (row[0] or 0.0) if row else 0.0
         count = (row[1] or 0) if row else 0
-        total_km = (row[2] or 0.0) if row else 0.0
+        sql_total_km = (row[2] or 0.0) if row else 0.0
+        
+        # Priority: If athlete_profile has a matching shoe, use its cumulative mileage
+        # as it includes historical data before the SQL DB was introduced.
+        total_km = sql_total_km
+        shoe_model = nickname  # Default to nickname if model not found
+        try:
+            from . import athlete_profile
+            profile = athlete_profile.load_profile()
+            for s in profile.get("shoes", []):
+                if s["nickname"] == nickname:
+                    total_km = max(total_km, s.get("current_km", 0.0))
+                    shoe_model = s.get("model", nickname)
+                    break
+        except Exception:
+            # Fallback to standalone import if package-style fails
+            try:
+                import athlete_profile
+                profile = athlete_profile.load_profile()
+                for s in profile.get("shoes", []):
+                    if s["nickname"] == nickname:
+                        total_km = max(total_km, s.get("current_km", 0.0))
+                        shoe_model = s.get("model", nickname)
+                        break
+            except Exception:
+                pass
         
         # Get trend (compare last 3 runs vs historical average)
         cursor.execute('''
@@ -104,12 +129,33 @@ def get_shoe_stats(nickname: str) -> Dict[str, Any]:
         recent_avg = (row_recent[0] or 0.0) if row_recent else 0.0
         
         return {
+            "nickname": nickname,
+            "model": shoe_model,
             "avg_efficiency": round(avg_efficiency, 6),
             "recent_avg": round(recent_avg, 6),
             "activity_count": count,
             "total_km": round(total_km, 2),
             "deviation_pct": round(((recent_avg / avg_efficiency) - 1) * 100, 2) if avg_efficiency > 0 else 0.0
         }
+    finally:
+        conn.close()
+
+def get_shoe_for_activity(activity_id: str) -> Optional[str]:
+    """Retrieve the shoe nickname associated with a specific activity ID."""
+    if not activity_id:
+        return None
+        
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT shoe_nickname FROM shoe_activities WHERE activity_id = ?', (str(activity_id),))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Error fetching shoe for activity {activity_id}: {e}")
+        return None
     finally:
         conn.close()
 

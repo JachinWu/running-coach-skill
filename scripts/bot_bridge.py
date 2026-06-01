@@ -24,8 +24,8 @@ try:
     from . import weather
     from . import performance_vdot
     from . import daniels_periodization
-    from . import performance_radar
     from . import image_generator
+    from . import character_card
 except ImportError:
     import garmin
     import athlete_profile
@@ -34,10 +34,18 @@ except ImportError:
     import weather
     import performance_vdot
     import daniels_periodization
-    import performance_radar
     import image_generator
+    import character_card
 
 import requests
+try:
+    from scripts.ai_engine import generate_content
+except ImportError:
+    import sys
+    from pathlib import Path
+    workspace = Path(__file__).resolve().parents[4]
+    sys.path.insert(0, str(workspace))
+    from scripts.ai_engine import generate_content
 import tempfile
 import shutil
 
@@ -517,109 +525,6 @@ async def upload_and_replace_workout(api, workout_json: dict) -> bool:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, garmin.upload_and_replace_workout, api, workout_json)
 
-
-async def get_radar_report(api) -> Dict[str, Any]:
-    """Logic for /radar command. Aggregates 4-week stats and generates combat radar."""
-    loop = asyncio.get_event_loop()
-    
-    try:
-        # 1. Fetch 4 weeks of comprehensive data (28 days)
-        daily_list = await loop.run_in_executor(None, garmin.get_comprehensive_daily_stats, api, 28)
-        if not daily_list or (isinstance(daily_list[0], dict) and "error" in daily_list[0]):
-            return {"error": daily_list[0].get("error", "無法獲取數據")}
-
-        # 2. Aggregate Metrics
-        total_dist = sum(d.get("distance_km", 0) for d in daily_list)
-        avg_weekly_dist = total_dist / 4.0
-        
-        activities_count = sum(1 for d in daily_list if d.get("distance_km", 0) > 0)
-        total_elev_gain = 0.0 # Garmin daily stats might not have elevation, let's try activities
-        
-        hrv_values = [d.get("hrv", 0) for d in daily_list if d.get("hrv", 0) > 0]
-        avg_hrv = sum(hrv_values) / len(hrv_values) if hrv_values else 0
-        
-        # We need elevation gain. Since daily stats are limited, let's fetch activities.
-        today = datetime.date.today()
-        start_date = today - datetime.timedelta(days=27)
-        success_act, activities, _ = await loop.run_in_executor(
-            None, 
-            garmin.safe_api_call, 
-            api.get_activities_by_date, 
-            start_date.isoformat(), 
-            today.isoformat(), 
-            "running"
-        )
-        if success_act and activities:
-            total_elev_gain = sum(a.get("elevationGain", 0) for a in activities)
-
-        # 3. Calculate Scores and Genre
-        profile = athlete_profile.load_profile()
-        vdot = profile.get("vdot", 40.0)
-        
-        # Standardizing inputs for the radar logic
-        # HRV Stability: use current vs 7-day avg or just normalized hrv
-        # For simplicity, we use avg_hrv / 80.0 as stability indicator
-        hrv_stability = min(1.0, avg_hrv / 80.0) if avg_hrv > 0 else 0.5
-
-        scores = performance_radar.calculate_radar_scores(
-            weekly_dist_km=avg_weekly_dist,
-            vdot=vdot,
-            frequency_days=int(activities_count / 4.0 * 7), # extrapolated to week
-            total_elev_gain=total_elev_gain / 4.0, # avg weekly elev
-            hrv_stability=hrv_stability
-        )
-        genre = performance_radar.determine_genre(scores)
-        gender = profile.get("gender", "male")
-
-        # 4. Generate Background and Chart
-        temp_dir = tempfile.mkdtemp()
-        bg_path = os.path.join(temp_dir, "radar_bg.png")
-        output_path = os.path.join(temp_dir, "radar_report.png")
-        
-        bg_res = await loop.run_in_executor(None, image_generator.generate_genre_background, genre, bg_path, gender)
-        bg_success, bg_url = bg_res if isinstance(bg_res, tuple) else (bg_res, None)
-        
-        chart_path = await loop.run_in_executor(
-            None, 
-            visualizer.generate_radar_chart, 
-            scores, 
-            genre, 
-            output_path, 
-            bg_path if bg_success else None
-        )
-        
-        if not chart_path:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return {"error": "無法生成雷達圖表"}
-
-        # 5. Prepare Caption
-        caption = (
-            f"🛡️ **跑者戰力雷達圖 (v2.0)**\n\n"
-            f"根據過去 4 週的訓練數據與跑力表現，教練為您定義的目前流派為：\n"
-            f"🏆 **【{genre}】**\n\n"
-            f"📊 **維度評分**：\n"
-            f"• 耐力：{scores['耐力']}\n"
-            f"• 速度：{scores['速度']}\n"
-            f"• 一致性：{scores['一致性']}\n"
-            f"• 地形適應：{scores['地形適應']}\n"
-            f"• 恢復力：{scores['恢復力']}\n\n"
-            f"💡 *教練點評*：這張圖展現了您目前的發展重心。{performance_radar.GENRE_PROMPTS.get(genre, '')}"
-        )
-
-        return {
-            "caption": caption,
-            "photo_path": chart_path,
-            "temp_dir": temp_dir,
-            "genre": genre,
-            "scores": scores,
-            "bg_url": bg_url
-        }
-        
-    except Exception as e:
-        logger.error(f"Error generating radar report: {e}")
-        return {"error": str(e)}
-
-
 async def get_weekly_report_data(api) -> dict:
     """Logic for /report command (Integrated with /status info).
     
@@ -946,16 +851,9 @@ async def run_post_run_polling(
                             session_id = uuid.uuid4().hex
                             prompt = await compose_analysis_prompt(api, activity, workout_detail)
                             
-                            # Execute Gemini CLI with session_id
-                            cmd = ["gemini", "--skip-trust", "--approval-mode", "yolo", "--session-id", session_id, "-p", prompt]
-                            process = await asyncio.create_subprocess_exec(
-                                *cmd,
-                                stdin=asyncio.subprocess.DEVNULL,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180.0)
-                            output = stdout.decode().strip()
+                            # Execute Gemini CLI using the single entry point
+                            res, err_msg = await asyncio.to_thread(generate_content, prompt, session_id)
+                            output = res.strip() if res else ""
                             
                             if output:
                                 date_str = activity.get("startTimeLocal", "")[:10]

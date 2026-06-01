@@ -2,7 +2,7 @@
 name: running-coach
 description: A specialized coach for analyzing running data, creating training plans, and syncing them directly with Garmin Connect. Use when the user asks for running advice, training schedules, or data analysis.
 metadata:
-  author: Gemini-CLI
+  author: Antigravity-CLI
   version: 1.2.0
 ---
 
@@ -181,6 +181,6 @@ await bot_bridge.run_post_run_polling(
     - `visualizer.py`: Generates chart images for weekly training reports using QuickChart.
     - `upload_calendar.py`: Optional Google Calendar integration (event upload or calendar→Garmin sync).
 - **Data**:
-    - `.gemini/skills/running-coach/data/athlete_profile.json`: Persistent athlete memory (PBs, injuries, milestones, and race goals).
+    - `.antigravity/skills/running-coach/data/athlete_profile.json`: Persistent athlete memory (PBs, injuries, milestones, and race goals).
 - **References**:
     - `references/original_sop.md`: Original coaching SOP (superseded — see SKILL.md for current workflow).
